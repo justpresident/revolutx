@@ -146,6 +146,43 @@ Do not overuse type-state builders unless they clearly improve safety without
 making the API hard to read. Simple constructors and consuming builders are
 preferred.
 
+## Engineering Standards
+
+This project should be built as a maintainable public SDK, not a prototype.
+
+Follow SOLID principles pragmatically:
+- Single responsibility: keep auth, transport, endpoint groups, errors, and
+  domain models separate.
+- Open/closed: leave room for new endpoints and optional signing backends
+  without forcing broad rewrites.
+- Liskov/interface segregation/dependency inversion: introduce traits only when
+  they make a real boundary cleaner, such as testable signing or an optional
+  custom signer. Avoid trait-heavy design for its own sake.
+
+Readable code is a release requirement. The signing path, request construction,
+order builders, and error handling should be straightforward to audit. Prefer
+plain functions and cohesive structs over clever generic abstractions.
+
+Avoid duplicated logic. In particular, signing message construction, JSON body
+serialization, query construction, response status parsing, and API error
+classification should live in shared infrastructure.
+
+High practical test coverage is expected around risky behavior:
+- auth signing and exact message construction
+- minified JSON body serialization
+- query/path handling
+- domain validation and decimal serialization
+- endpoint request construction
+- response/error parsing
+- OpenAPI operation coverage drift
+- public examples
+
+Performance matters, but correctness comes first. Avoid obvious hot-path waste:
+do not serialize request bodies once for signing and again differently for
+sending, avoid unnecessary large clones, and keep query/body construction
+deterministic. Do not add complex optimizations without measurement or a clear
+reason.
+
 ## Authentication Design
 
 RevolutX uses custom Ed25519 signing, not a simple bearer token.

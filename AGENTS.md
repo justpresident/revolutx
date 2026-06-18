@@ -89,6 +89,45 @@ src/
 This layout is guidance, not a hard requirement. Follow the existing code once
 it exists, and prefer cohesive modules over a mechanically generated structure.
 
+## Engineering standards
+
+Build this as a public SDK, not a prototype.
+
+Code quality expectations:
+- Keep modules small and cohesive. Each module should have one clear
+  responsibility: auth, transport, errors, endpoint grouping, or domain models.
+- Follow SOLID principles pragmatically. Do not add traits, generics, or
+  abstraction layers unless they reduce real coupling, make testing cleaner, or
+  support a clear extension point.
+- Avoid duplicated logic for signing, request construction, serialization,
+  response parsing, and error classification. Shared behavior belongs in shared
+  infrastructure.
+- Prefer obvious, readable code over clever code. Future maintainers should be
+  able to audit signing and order placement without reverse-engineering dense
+  abstractions.
+- Keep public API names stable, idiomatic, and domain-oriented. Do not leak
+  transport or generated/OpenAPI internals into public types.
+- Keep dependencies minimal and justified.
+
+Testing expectations:
+- Aim for high practical coverage over the risky parts: auth signing, exact
+  signature message construction, JSON body serialization, query/path handling,
+  error classification, domain model validation, endpoint coverage, and public
+  examples.
+- Default tests must be fast, deterministic, and offline.
+- Prefer focused unit tests plus mock HTTP endpoint tests over broad brittle
+  integration tests.
+- Add regression tests for every bug fixed or API mismatch discovered.
+
+Performance expectations:
+- Correctness comes first, especially for signing and order placement.
+- Avoid obvious inefficiencies in hot paths: do not serialize request bodies
+  twice when signing and sending, avoid unnecessary clones of large payloads,
+  and keep query/body construction deterministic.
+- Keep test suites fast enough that maintainers run them frequently.
+- Do not micro-optimize before the API is correct and measured; document any
+  performance-driven complexity.
+
 ## Authentication requirements
 
 Revolut X uses custom Ed25519 request signing.
