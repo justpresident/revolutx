@@ -1,0 +1,14 @@
+[package]
+name = "revolutx"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Unofficial Rust SDK for the Revolut X Crypto Exchange REST API"
+readme = "README.md"
+repository = "https://github.com/curriedsoftware/revolutx"
+keywords = ["revolut", "crypto", "exchange", "trading", "api"]
+categories = ["api-bindings", "cryptography::cryptocurrencies"]
+
+[dependencies]
+

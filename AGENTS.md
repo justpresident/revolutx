@@ -39,6 +39,7 @@ and subordinate to the stable domain API.
 
 Relevant local context:
 - Repo root: `/workspace/revolutx`
+- Chosen crate name: `revolutx` without a hyphen
 - OpenAPI submodule: `revolut-openapi`
 - Revolut X JSON spec: `revolut-openapi/json/revolut-x.json`
 - Revolut X YAML spec: `revolut-openapi/yaml/revolut-x.yml`
@@ -168,6 +169,7 @@ The current high-level plan is:
    data, order builders, order management, trades.
 7. Add mock HTTP tests, opt-in live smoke tests, docs/examples, CI, and
    publishing metadata.
+8. Run a deliberate public API review before publishing.
 
 When implementing a task, read the task's full notes first. They contain design
 context and acceptance criteria intended for another agent to execute without
@@ -220,14 +222,20 @@ Default `cargo test` should be offline and deterministic:
 ## Dependency guidance
 
 Keep the crate lean. Expected dependencies may include:
-- `reqwest` with rustls for HTTP
+- `reqwest` with `rustls-tls` for HTTP
 - `serde` and `serde_json`
 - `thiserror`
 - `ed25519-dalek`
+- `pkcs8` for PEM key loading if needed
 - `base64`
 - `rust_decimal`
-- `time` or `chrono`
+- `time` for timestamps unless implementation evidence favors `chrono`
+- `url` for robust URL/path/query handling if `reqwest` alone is not enough
 - `uuid` only if useful for client order IDs or spec compatibility
+- `tokio` as a dev/example dependency for async examples and tests
 
 Do not add a heavy OpenAPI parser or generator unless a task explicitly needs
 it. Raw `serde_json` is enough for spec inventory and coverage tests.
+
+Set an intentional MSRV with `rust-version` in `Cargo.toml` once dependency
+versions are selected.

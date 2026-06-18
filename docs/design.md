@@ -108,6 +108,10 @@ Cons:
 
 The public API should optimize for clarity, correctness, and bot ergonomics.
 
+The chosen crate name is `revolutx` without a hyphen. Keep the Rust import path
+and crate branding simple unless there is a strong publishing reason to revisit
+this.
+
 Prefer endpoint groups:
 - `client.balances()`
 - `client.configuration()`
@@ -276,21 +280,28 @@ separate and very explicit dangerous opt-in.
 ## Dependency Policy
 
 Keep dependencies minimal and defensible. Expected dependencies may include:
-- `reqwest` with rustls for HTTP
+- `reqwest` with `rustls-tls` for HTTP
 - `serde` and `serde_json`
 - `thiserror`
 - `ed25519-dalek`
+- `pkcs8` for PEM key loading, if needed by the Ed25519 implementation
 - `base64`
 - `rust_decimal`
-- `time` or `chrono`
+- `time` for timestamps unless implementation evidence favors `chrono`
+- `url` for robust URL/path/query handling if `reqwest` alone is not enough
 - `uuid` only if useful for client order IDs or spec compatibility
+- `tokio` as a dev/example dependency for async examples and tests
 
 Avoid heavy OpenAPI parsing or generation dependencies unless a task proves the
 need. Raw `serde_json` is enough for spec inventory and coverage tests.
 
+Set an intentional MSRV with `rust-version` in `Cargo.toml` once dependency
+versions are chosen. Do not leave MSRV accidental for a public crate.
+
 ## Release Quality Bar
 
 Before public release:
+- A public API review has been completed.
 - `cargo fmt --check` passes.
 - `cargo clippy --all-targets --all-features -- -D warnings` passes.
 - `cargo test --all-features` passes without secrets or live network calls.
@@ -304,8 +315,7 @@ Before public release:
 ## Open Questions
 
 These should be resolved during implementation:
-- Final crate name: `revolutx` versus `revolut-x`.
-- Whether to use `time` or `chrono`.
+- Exact MSRV after dependencies are selected.
 - Whether `ClientOrderId` should be UUID-specific or a more general string
   wrapper.
 - Whether to expose a custom signer trait for HSM/remote-signing users.
