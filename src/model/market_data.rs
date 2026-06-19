@@ -68,7 +68,7 @@ pub struct OrderBookLevel {
 /// Used by both the authenticated and public order-book endpoints; the only
 /// wire difference (millisecond vs ISO-8601 timestamps) is absorbed by
 /// [`Timestamp`].
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawOrderBook")]
 pub struct OrderBook {
     /// Ask (sell) levels.
@@ -148,7 +148,7 @@ pub struct Ticker {
 }
 
 /// A set of tickers and the time they were captured.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawTickers")]
 pub struct Tickers {
     /// The per-pair tickers.
@@ -222,7 +222,7 @@ pub struct Trade {
 }
 
 /// The latest public trades and the time they were captured.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawLastTrades")]
 pub struct LastTrades {
     /// The most recent trades.

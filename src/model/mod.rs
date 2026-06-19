@@ -11,7 +11,7 @@ pub mod market_data;
 pub mod orders;
 pub mod trades;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use common::Timestamp;
 
@@ -21,7 +21,7 @@ use common::Timestamp;
 /// Pass [`Page::next_cursor`] back into the originating query's `cursor` field
 /// to fetch the following page. An empty cursor from the server is normalized
 /// to `None`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawPage<T>")]
 pub struct Page<T> {
     /// The items on this page.
