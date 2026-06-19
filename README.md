@@ -1,5 +1,11 @@
 # revolutx
 
+![CI](https://github.com/justpresident/revolutx/actions/workflows/ci.yml/badge.svg?branch=master)
+![Coverage](https://raw.githubusercontent.com/justpresident/revolutx/master/.github/badges/coverage.svg)
+[![Crates.io](https://img.shields.io/crates/v/revolutx.svg)](https://crates.io/crates/revolutx)
+[![Docs.rs](https://docs.rs/revolutx/badge.svg)](https://docs.rs/revolutx)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Unofficial Rust SDK for the [Revolut X](https://exchange.revolut.com/) crypto
 exchange REST API.
 
