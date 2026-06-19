@@ -21,6 +21,9 @@ exclude = [
     "tests/spec_coverage.rs",
 ]
 
+[workspace]
+members = ["mcp"]
+
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

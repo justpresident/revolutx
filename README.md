@@ -170,6 +170,11 @@ REVOLUTX_API_KEY=... cargo run --example get_balances
 `examples/place_limit_order.rs` performs **real trading** and is guarded by
 `REVOLUTX_CONFIRM_PLACE_ORDER=yes`.
 
+## Related crates
+
+- [`revolutx-mcp`](mcp) — a Model Context Protocol (MCP) server that exposes
+  this SDK to LLM clients such as Claude Desktop (`cargo install revolutx-mcp`).
+
 ## Testing
 
 The default test suite is fast, deterministic, and offline:
