@@ -1,19 +1,189 @@
 # revolutx
 
-Unofficial Rust SDK for the Revolut X Crypto Exchange REST API.
+Unofficial Rust SDK for the [Revolut X](https://exchange.revolut.com/) crypto
+exchange REST API.
 
-This crate is planned as a handwritten, domain-oriented SDK for trading bots
-and automation. The local `revolut-openapi` submodule is used as the API
-contract and test source, but generated OpenAPI types should not become the
-public API.
+`revolutx` is a handwritten, domain-oriented SDK aimed at trading bots and
+automation. It models trading concepts — symbols, sides, orders, fills,
+balances, order books, candles, tickers — as Rust types, signs requests
+automatically with Ed25519, and never represents money or quantities as `f64`
+(all decimals use [`rust_decimal`]).
 
-Development context lives in:
+> **Not affiliated with Revolut.** Trading automation carries financial risk.
+> You are responsible for your own validation, risk controls, and credential
+> security. This crate handles API access, typing, signing, and error reporting
+> only — it does not provide trading strategy or risk management.
 
-- `AGENTS.md` for the operational handoff.
-- `docs/design.md` for architecture rationale.
-- `ta list --ready` for the executable task backlog.
+## Features
 
-The SDK is not affiliated with Revolut. Trading automation carries financial
-risk; callers are responsible for their own validation, risk controls, and
-credential security.
+- Domain-oriented, handwritten API — not a generated OpenAPI client.
+- Automatic Ed25519 request signing (`X-Revx-API-Key` / `X-Revx-Timestamp` /
+  `X-Revx-Signature`); callers never build these headers.
+- Decimal-safe values everywhere via `rust_decimal::Decimal` (re-exported as
+  `revolutx::Decimal`).
+- Full endpoint coverage: balances, configuration, market data, orders, and
+  trades — verified against the OpenAPI spec by a drift test.
+- Safe order builders that prevent obviously invalid requests.
+- Typed errors that distinguish configuration, auth, rate-limit, and API errors.
+- Async (`reqwest` + `rustls`), with optional unauthenticated access to the
+  public market-data endpoints.
 
+## Installation
+
+```toml
+[dependencies]
+revolutx = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+## Generating an API key
+
+Create an Ed25519 key pair and register the public key in the
+[Revolut X web app](https://exchange.revolut.com/):
+
+```sh
+openssl genpkey -algorithm ed25519 -out private.pem
+openssl pkey -in private.pem -pubout -out public.pem
+```
+
+Keep `private.pem` secret. The SDK loads it via
+[`ClientBuilder::private_key_pem`].
+
+## Quick start
+
+```rust,no_run
+use revolutx::{Environment, RevolutXClient};
+
+#[tokio::main]
+async fn main() -> revolutx::Result<()> {
+    let client = RevolutXClient::builder()
+        .api_key("your-api-key")
+        .private_key_pem(std::fs::read_to_string("private.pem").unwrap())
+        .environment(Environment::Production)
+        .build()?;
+
+    // Account
+    let balances = client.balances().get_all().await?;
+    for b in &balances {
+        println!("{}: {} available", b.currency, b.available);
+    }
+
+    // Market data
+    let book = client.market_data().order_book("BTC-USD").await?;
+    println!("{} bids / {} asks", book.bids.len(), book.asks.len());
+
+    Ok(())
+}
+```
+
+### Public market data (no credentials)
+
+```rust,no_run
+# async fn run() -> revolutx::Result<()> {
+let client = revolutx::RevolutXClient::builder().build()?;
+let book = client.market_data().public_order_book("BTC-USD").await?;
+let last = client.market_data().last_trades().await?;
+println!("{} bid levels, {} recent trades", book.bids.len(), last.trades.len());
+# Ok(())
+# }
+```
+
+### Placing orders
+
+Order builders validate the request (positive price/size, non-empty symbol,
+exactly one configuration and size) and sign it for you:
+
+```rust,no_run
+use revolutx::{Decimal, RevolutXClient};
+use std::str::FromStr;
+
+# async fn run(client: RevolutXClient) -> revolutx::Result<()> {
+// Post-only limit buy of 0.1 BTC at 50,000.50 quote.
+let ack = client
+    .orders()
+    .limit_buy("BTC-USD", Decimal::from_str("0.1").unwrap(), Decimal::from_str("50000.50").unwrap())
+    .post_only()
+    .send()
+    .await?;
+println!("order {} -> {:?}", ack.venue_order_id, ack.state);
+
+// Market sell using a quote amount.
+let ack = client
+    .orders()
+    .market_sell_quote("BTC-USD", Decimal::from_str("100").unwrap())
+    .send()
+    .await?;
+
+// Manage orders.
+let active = client.orders().active(&Default::default()).await?;
+client.orders().cancel_all().await?;
+# let _ = (ack, active);
+# Ok(())
+# }
+```
+
+### Error handling and rate limits
+
+```rust,no_run
+# async fn run(client: revolutx::RevolutXClient) {
+match client.balances().get_all().await {
+    Ok(balances) => println!("{} balances", balances.len()),
+    Err(e) if e.is_rate_limited() => {
+        if let Some(delay) = e.retry_after() {
+            eprintln!("rate limited; retry after {delay:?}");
+        }
+    }
+    Err(e) if e.is_auth_error() => eprintln!("auth problem: {e}"),
+    Err(e) => eprintln!("request failed: {e}"),
+}
+# }
+```
+
+## Endpoint groups
+
+| Group | Methods |
+|-------|---------|
+| `client.balances()` | `get_all` |
+| `client.configuration()` | `currencies`, `pairs` |
+| `client.market_data()` | `order_book`, `order_book_with_limit`, `public_order_book`, `candles`, `tickers`, `tickers_for`, `last_trades` |
+| `client.orders()` | `limit_buy`/`limit_sell`(`_quote`), `market_buy`/`market_sell`(`_quote`), `place`, `replace`, `get`, `active`, `historical`, `cancel`, `cancel_all`, `fills` |
+| `client.trades()` | `all`, `private` |
+
+See [`docs/openapi-inventory.md`](docs/openapi-inventory.md) for the full
+operation/schema mapping.
+
+## Examples
+
+Runnable examples live in [`examples/`](examples):
+
+```sh
+cargo run --example market_data -- BTC-USD          # public, no credentials
+REVOLUTX_API_KEY=... cargo run --example get_balances
+```
+
+`examples/place_limit_order.rs` performs **real trading** and is guarded by
+`REVOLUTX_CONFIRM_PLACE_ORDER=yes`.
+
+## Testing
+
+The default test suite is fast, deterministic, and offline:
+
+```sh
+cargo test
+```
+
+Opt-in, read-only live smoke tests require credentials and are ignored by
+default:
+
+```sh
+export REVOLUTX_API_KEY=... REVOLUTX_PRIVATE_KEY_PEM="$(cat private.pem)"
+cargo test --test live_smoke -- --ignored --nocapture
+```
+
+## MSRV
+
+Rust 1.85 (edition 2024).
+
+## License
+
+Licensed under the [MIT license](LICENSE).
