@@ -186,4 +186,4 @@ Rust 1.85 (edition 2024).
 
 ## License
 
-Licensed under the [MIT license](LICENSE).
+Licensed under the [Apache License 2.0](LICENSE).
