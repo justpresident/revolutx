@@ -986,6 +986,7 @@ dependencies = [
  "time",
  "tokio",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

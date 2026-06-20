@@ -18,13 +18,13 @@
 //! The bytes used for the body and query when signing are the exact bytes sent
 //! on the wire, so the signature always matches the transmitted request.
 
-use std::borrow::Cow;
 use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use ed25519_dalek::{Signer as _, SigningKey};
+use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 
@@ -46,17 +46,23 @@ pub(crate) const SIGNATURE_HEADER: &str = "X-Revx-Signature";
 /// signer.
 pub trait Signer: Send + Sync {
     /// The API key to send in the `X-Revx-API-Key` header.
-    fn api_key(&self) -> Cow<'_, str>;
+    ///
+    /// Returned in a [`Zeroizing`] wrapper so the caller's copy is wiped from
+    /// memory on drop — a decrypting signer can hand back freshly-decrypted key
+    /// material and have it cleared right after the header is set.
+    fn api_key(&self) -> Zeroizing<String>;
 
-    /// Signs the canonical message, returning the base64-encoded signature.
+    /// Signs the canonical message, returning the base64-encoded signature. The
+    /// signature is public (sent on the wire), so it is not zeroized.
     fn sign(&self, message: &[u8]) -> Result<String>;
 }
 
 /// The default [`Signer`]: holds the API key and the Ed25519 signing key in
-/// memory for the lifetime of the client.
+/// memory for the lifetime of the client. Both are zeroized on drop (the key
+/// via `ed25519-dalek`'s `zeroize` support).
 #[derive(Clone)]
 pub struct Ed25519Signer {
-    api_key: String,
+    api_key: Zeroizing<String>,
     signing_key: SigningKey,
 }
 
@@ -67,7 +73,7 @@ impl Ed25519Signer {
         let signing_key = SigningKey::from_pkcs8_pem(pem)
             .map_err(|e| Error::key(format!("could not parse PKCS#8 PEM Ed25519 key: {e}")))?;
         Ok(Self {
-            api_key: api_key.into(),
+            api_key: Zeroizing::new(api_key.into()),
             signing_key,
         })
     }
@@ -75,15 +81,15 @@ impl Ed25519Signer {
     /// Builds from the raw 32-byte Ed25519 private key seed.
     pub fn from_seed(api_key: impl Into<String>, seed: [u8; 32]) -> Self {
         Self {
-            api_key: api_key.into(),
+            api_key: Zeroizing::new(api_key.into()),
             signing_key: SigningKey::from_bytes(&seed),
         }
     }
 }
 
 impl Signer for Ed25519Signer {
-    fn api_key(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&self.api_key)
+    fn api_key(&self) -> Zeroizing<String> {
+        self.api_key.clone()
     }
 
     fn sign(&self, message: &[u8]) -> Result<String> {
@@ -196,7 +202,7 @@ mod tests {
     #[test]
     fn pem_key_signs_to_known_signature() {
         let creds = Ed25519Signer::from_pem("api-key", TEST_PEM).unwrap();
-        assert_eq!(creds.api_key().as_ref(), "api-key");
+        assert_eq!(creds.api_key().as_str(), "api-key");
         let msg = signing_message(1_700_000_000_000, "GET", "/api/1.0/balances", "", b"");
         assert_eq!(creds.sign(&msg).unwrap(), GET_BALANCES_SIG);
     }

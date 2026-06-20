@@ -203,8 +203,11 @@ impl LocalExecutor {
             let timestamp = now_unix_millis();
             let message = signing_message(timestamp, method_token, &full_path, &query, body);
             let signature = signer.sign(&message)?;
+            // `api_key` is `Zeroizing`: it is wiped when this block ends, after
+            // reqwest has copied it into the header.
+            let api_key = signer.api_key();
             request = request
-                .header(API_KEY_HEADER, signer.api_key().as_ref())
+                .header(API_KEY_HEADER, api_key.as_str())
                 .header(TIMESTAMP_HEADER, timestamp.to_string())
                 .header(SIGNATURE_HEADER, signature);
         }

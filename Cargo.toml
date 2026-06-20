@@ -27,7 +27,7 @@ members = ["mcp"]
 [features]
 default = ["rest"]
 # REST API: Ed25519-signed HTTP client and the endpoint groups (the current SDK).
-rest = ["dep:reqwest", "dep:ed25519-dalek", "dep:base64"]
+rest = ["dep:reqwest", "dep:ed25519-dalek", "dep:base64", "dep:zeroize"]
 # FIX 4.4 client (market data + trading). Not yet implemented; reserved so the
 # feature/module layout is in place. See the `fix` backlog task.
 fix = []
@@ -44,6 +44,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "pem", "pkcs8", "zeroize"], optional = true }
 base64 = { version = "0.22", optional = true }
+zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

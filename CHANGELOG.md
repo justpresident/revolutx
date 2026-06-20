@@ -23,7 +23,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (default `LocalExecutor`, set via `ClientBuilder::executor` /
   `RevolutXClient::with_executor`) for custom execution backends (e.g. a signing
   agent in another process). The `transport` module, `RequestSpec`, and
-  `RawResponse` are now public. `ed25519-dalek`'s `zeroize` is enabled.
+  `RawResponse` are now public. `Signer::api_key` returns `Zeroizing<String>`
+  and `ed25519-dalek`'s `zeroize` is enabled, so credentials are wiped from
+  memory on drop.
 
 ## [0.1.0] - 2026-06-19
 
