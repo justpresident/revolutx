@@ -17,9 +17,6 @@ impl<'a> BalancesApi<'a> {
 
     /// `GET /balances` — returns all currency balances for the account.
     pub async fn get_all(&self) -> Result<Vec<Balance>> {
-        self.client
-            .transport()
-            .send_json(RequestSpec::get("/balances"))
-            .await
+        self.client.send_json(RequestSpec::get("/balances")).await
     }
 }

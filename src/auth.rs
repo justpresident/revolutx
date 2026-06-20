@@ -18,6 +18,7 @@
 //! The bytes used for the body and query when signing are the exact bytes sent
 //! on the wire, so the signature always matches the transmitted request.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use base64::Engine as _;
@@ -34,17 +35,35 @@ pub(crate) const TIMESTAMP_HEADER: &str = "X-Revx-Timestamp";
 /// Header carrying the base64-encoded Ed25519 signature.
 pub(crate) const SIGNATURE_HEADER: &str = "X-Revx-Signature";
 
-/// API credentials: an API key plus the Ed25519 key used to sign requests.
+/// Authenticates Revolut X requests: supplies the API key and signs the
+/// canonical message.
+///
+/// The transport calls [`Signer::api_key`] and [`Signer::sign`] **once per
+/// request**, so an implementation may fetch or decrypt key material on demand
+/// (and zeroize it immediately after). The default implementation is
+/// [`Ed25519Signer`], which keeps the key in memory; custom implementations can
+/// back the signing with an encrypted keystore, a hardware token, or a remote
+/// signer.
+pub trait Signer: Send + Sync {
+    /// The API key to send in the `X-Revx-API-Key` header.
+    fn api_key(&self) -> Cow<'_, str>;
+
+    /// Signs the canonical message, returning the base64-encoded signature.
+    fn sign(&self, message: &[u8]) -> Result<String>;
+}
+
+/// The default [`Signer`]: holds the API key and the Ed25519 signing key in
+/// memory for the lifetime of the client.
 #[derive(Clone)]
-pub(crate) struct Credentials {
+pub struct Ed25519Signer {
     api_key: String,
     signing_key: SigningKey,
 }
 
-impl Credentials {
-    /// Loads credentials from a PKCS#8 PEM private key, as produced by
+impl Ed25519Signer {
+    /// Loads from a PKCS#8 PEM private key, as produced by
     /// `openssl genpkey -algorithm ed25519 -out private.pem`.
-    pub(crate) fn from_pem(api_key: impl Into<String>, pem: &str) -> Result<Self> {
+    pub fn from_pem(api_key: impl Into<String>, pem: &str) -> Result<Self> {
         let signing_key = SigningKey::from_pkcs8_pem(pem)
             .map_err(|e| Error::key(format!("could not parse PKCS#8 PEM Ed25519 key: {e}")))?;
         Ok(Self {
@@ -53,30 +72,30 @@ impl Credentials {
         })
     }
 
-    /// Builds credentials from the raw 32-byte Ed25519 private key seed.
-    pub(crate) fn from_seed(api_key: impl Into<String>, seed: [u8; 32]) -> Self {
+    /// Builds from the raw 32-byte Ed25519 private key seed.
+    pub fn from_seed(api_key: impl Into<String>, seed: [u8; 32]) -> Self {
         Self {
             api_key: api_key.into(),
             signing_key: SigningKey::from_bytes(&seed),
         }
     }
+}
 
-    /// Returns the configured API key.
-    pub(crate) fn api_key(&self) -> &str {
-        &self.api_key
+impl Signer for Ed25519Signer {
+    fn api_key(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.api_key)
     }
 
-    /// Signs a canonical message and returns the base64-encoded signature.
-    pub(crate) fn sign(&self, message: &[u8]) -> String {
+    fn sign(&self, message: &[u8]) -> Result<String> {
         let signature = self.signing_key.sign(message);
-        BASE64.encode(signature.to_bytes())
+        Ok(BASE64.encode(signature.to_bytes()))
     }
 }
 
-impl fmt::Debug for Credentials {
+impl fmt::Debug for Ed25519Signer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Never print key material.
-        f.debug_struct("Credentials")
+        f.debug_struct("Ed25519Signer")
             .field("api_key", &"<redacted>")
             .field("signing_key", &"<redacted>")
             .finish()
@@ -176,24 +195,24 @@ mod tests {
 
     #[test]
     fn pem_key_signs_to_known_signature() {
-        let creds = Credentials::from_pem("api-key", TEST_PEM).unwrap();
-        assert_eq!(creds.api_key(), "api-key");
+        let creds = Ed25519Signer::from_pem("api-key", TEST_PEM).unwrap();
+        assert_eq!(creds.api_key().as_ref(), "api-key");
         let msg = signing_message(1_700_000_000_000, "GET", "/api/1.0/balances", "", b"");
-        assert_eq!(creds.sign(&msg), GET_BALANCES_SIG);
+        assert_eq!(creds.sign(&msg).unwrap(), GET_BALANCES_SIG);
     }
 
     #[test]
     fn seed_key_matches_pem_key() {
-        let pem = Credentials::from_pem("k", TEST_PEM).unwrap();
-        let seed = Credentials::from_seed("k", TEST_SEED);
+        let pem = Ed25519Signer::from_pem("k", TEST_PEM).unwrap();
+        let seed = Ed25519Signer::from_seed("k", TEST_SEED);
         let msg = signing_message(1_700_000_000_000, "GET", "/api/1.0/balances", "", b"");
-        assert_eq!(seed.sign(&msg), pem.sign(&msg));
-        assert_eq!(seed.sign(&msg), GET_BALANCES_SIG);
+        assert_eq!(seed.sign(&msg).unwrap(), pem.sign(&msg).unwrap());
+        assert_eq!(seed.sign(&msg).unwrap(), GET_BALANCES_SIG);
     }
 
     #[test]
     fn signs_post_body_to_known_signature() {
-        let creds = Credentials::from_seed("k", TEST_SEED);
+        let creds = Ed25519Signer::from_seed("k", TEST_SEED);
         let msg = signing_message(
             1_700_000_000_000,
             "POST",
@@ -201,20 +220,20 @@ mod tests {
             "",
             POST_ORDERS_BODY.as_bytes(),
         );
-        assert_eq!(creds.sign(&msg), POST_ORDERS_SIG);
+        assert_eq!(creds.sign(&msg).unwrap(), POST_ORDERS_SIG);
     }
 
     #[test]
     fn signature_is_valid_base64_of_64_bytes() {
-        let creds = Credentials::from_seed("k", TEST_SEED);
-        let sig = creds.sign(b"anything");
+        let creds = Ed25519Signer::from_seed("k", TEST_SEED);
+        let sig = creds.sign(b"anything").unwrap();
         let bytes = BASE64.decode(sig).unwrap();
         assert_eq!(bytes.len(), 64);
     }
 
     #[test]
     fn invalid_pem_is_rejected() {
-        let err = Credentials::from_pem(
+        let err = Ed25519Signer::from_pem(
             "k",
             "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----\n",
         )
@@ -224,7 +243,7 @@ mod tests {
 
     #[test]
     fn debug_does_not_leak_key_material() {
-        let creds = Credentials::from_seed("super-secret-api-key", TEST_SEED);
+        let creds = Ed25519Signer::from_seed("super-secret-api-key", TEST_SEED);
         let rendered = format!("{creds:?}");
         assert!(!rendered.contains("super-secret-api-key"));
         assert!(rendered.contains("redacted"));

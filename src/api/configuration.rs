@@ -20,7 +20,6 @@ impl<'a> ConfigurationApi<'a> {
     /// by currency code.
     pub async fn currencies(&self) -> Result<Currencies> {
         self.client
-            .transport()
             .send_json(RequestSpec::get("/configuration/currencies"))
             .await
     }
@@ -29,7 +28,6 @@ impl<'a> ConfigurationApi<'a> {
     /// pair code.
     pub async fn pairs(&self) -> Result<CurrencyPairs> {
         self.client
-            .transport()
             .send_json(RequestSpec::get("/configuration/pairs"))
             .await
     }

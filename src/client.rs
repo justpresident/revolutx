@@ -1,8 +1,8 @@
 //! Client configuration and endpoint entry points.
 //!
 //! [`RevolutXClient`] is the top-level handle. It is built with
-//! [`RevolutXClient::builder`], owns the shared HTTP transport, and exposes the
-//! endpoint groups: [`balances`](RevolutXClient::balances),
+//! [`RevolutXClient::builder`], owns a shared [`RequestExecutor`], and exposes
+//! the endpoint groups: [`balances`](RevolutXClient::balances),
 //! [`configuration`](RevolutXClient::configuration),
 //! [`market_data`](RevolutXClient::market_data),
 //! [`orders`](RevolutXClient::orders), and [`trades`](RevolutXClient::trades).
@@ -10,20 +10,30 @@
 //! A client may be built without credentials to access only the public market
 //! data endpoints; calling an authenticated endpoint in that case returns
 //! [`crate::Error::MissingCredentials`].
+//!
+//! Two seams make the client pluggable:
+//! [`ClientBuilder::signer`] swaps *how* requests are signed (e.g. an encrypted
+//! keystore), and [`ClientBuilder::executor`] swaps *where* they execute (e.g. a
+//! signing agent in another process).
 
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
+
+use serde::de::DeserializeOwned;
 
 use crate::api::balances::BalancesApi;
 use crate::api::configuration::ConfigurationApi;
 use crate::api::market_data::MarketDataApi;
 use crate::api::orders::OrdersApi;
 use crate::api::trades::TradesApi;
-use crate::auth::Credentials;
-use crate::error::{Error, Result};
-use crate::transport::Transport;
+use crate::auth::{Ed25519Signer, Signer};
+use crate::error::{Error, Result, classify_error_response};
+use crate::transport::{LocalExecutor, RequestExecutor, RequestSpec};
 
 /// Default request timeout when none is configured.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_BODY_PREVIEW: usize = 2048;
 
 /// Revolut X API environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,11 +56,11 @@ impl Environment {
 
 /// The main SDK client.
 ///
-/// Cloning is cheap: the underlying HTTP connection pool and credentials are
-/// shared.
-#[derive(Debug, Clone)]
+/// Cloning is cheap: the underlying executor (HTTP pool + credentials, or an
+/// agent connection) is shared behind an `Arc`.
+#[derive(Clone)]
 pub struct RevolutXClient {
-    transport: Transport,
+    executor: Arc<dyn RequestExecutor>,
 }
 
 impl RevolutXClient {
@@ -59,14 +69,19 @@ impl RevolutXClient {
         ClientBuilder::default()
     }
 
-    /// Returns the configured base URL.
-    pub fn base_url(&self) -> &str {
-        self.transport.base_url()
+    /// Builds a client over a custom [`RequestExecutor`].
+    pub fn with_executor(executor: Arc<dyn RequestExecutor>) -> Self {
+        Self { executor }
     }
 
-    /// Returns whether the client was configured with API credentials.
+    /// Returns the configured base URL.
+    pub fn base_url(&self) -> &str {
+        self.executor.base_url()
+    }
+
+    /// Returns whether the client can authenticate requests.
     pub fn is_authenticated(&self) -> bool {
-        self.transport.has_credentials()
+        self.executor.is_authenticated()
     }
 
     /// Account balance endpoints.
@@ -94,9 +109,49 @@ impl RevolutXClient {
         TradesApi::new(self)
     }
 
-    /// Internal accessor for endpoint modules.
-    pub(crate) fn transport(&self) -> &Transport {
-        &self.transport
+    /// Executes a request and deserializes a successful JSON response into `T`.
+    pub(crate) async fn send_json<T: DeserializeOwned>(&self, spec: RequestSpec) -> Result<T> {
+        let method = spec.method().as_str().to_owned();
+        let path = spec.path().to_owned();
+        let response = self.executor.execute(spec).await?;
+
+        if (200..300).contains(&response.status) {
+            serde_json::from_slice::<T>(&response.body).map_err(|source| Error::Deserialize {
+                method,
+                path,
+                source,
+                body: preview(&response.body),
+            })
+        } else {
+            Err(classify_error_response(
+                response.status,
+                response.retry_after,
+                &response.body,
+            ))
+        }
+    }
+
+    /// Executes a request expected to return no content (HTTP 204).
+    pub(crate) async fn send_no_content(&self, spec: RequestSpec) -> Result<()> {
+        let response = self.executor.execute(spec).await?;
+        if (200..300).contains(&response.status) {
+            Ok(())
+        } else {
+            Err(classify_error_response(
+                response.status,
+                response.retry_after,
+                &response.body,
+            ))
+        }
+    }
+}
+
+impl fmt::Debug for RevolutXClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RevolutXClient")
+            .field("base_url", &self.executor.base_url())
+            .field("authenticated", &self.executor.is_authenticated())
+            .finish()
     }
 }
 
@@ -112,6 +167,8 @@ enum KeySource {
 pub struct ClientBuilder {
     api_key: Option<String>,
     key: Option<KeySource>,
+    signer: Option<Arc<dyn Signer>>,
+    executor: Option<Arc<dyn RequestExecutor>>,
     environment: Option<Environment>,
     base_url: Option<String>,
     timeout: Option<Duration>,
@@ -136,6 +193,22 @@ impl ClientBuilder {
     /// users and tests).
     pub fn private_key_bytes(mut self, seed: [u8; 32]) -> Self {
         self.key = Some(KeySource::Seed(seed));
+        self
+    }
+
+    /// Supplies a custom [`Signer`] (e.g. an encrypted keystore or hardware
+    /// token), overriding `api_key` / `private_key_*`. Combined with the
+    /// configured base URL and HTTP client.
+    pub fn signer(mut self, signer: Arc<dyn Signer>) -> Self {
+        self.signer = Some(signer);
+        self
+    }
+
+    /// Supplies a fully custom [`RequestExecutor`] (e.g. an agent-backed
+    /// transport). When set, the base URL, timeout, HTTP client, and signer are
+    /// ignored — the executor is self-contained.
+    pub fn executor(mut self, executor: Arc<dyn RequestExecutor>) -> Self {
+        self.executor = Some(executor);
         self
     }
 
@@ -173,43 +246,76 @@ impl ClientBuilder {
 
     /// Builds the client, validating configuration and credentials.
     pub fn build(self) -> Result<RevolutXClient> {
-        let default_base_url = self.selected_environment().base_url().to_owned();
-        let base_url = self.base_url.unwrap_or(default_base_url);
+        let ClientBuilder {
+            api_key,
+            key,
+            signer,
+            executor,
+            environment,
+            base_url,
+            timeout,
+            http_client,
+        } = self;
+
+        // A fully custom executor is self-contained.
+        if let Some(executor) = executor {
+            return Ok(RevolutXClient { executor });
+        }
+
+        let environment = environment.unwrap_or(Environment::Production);
+        let base_url = base_url.unwrap_or_else(|| environment.base_url().to_owned());
         if base_url.trim().is_empty() {
             return Err(Error::configuration("base URL must not be empty"));
         }
 
-        let credentials = match (self.api_key, self.key) {
-            (Some(api_key), Some(KeySource::Pem(pem))) => {
-                Some(Credentials::from_pem(api_key, &pem)?)
-            }
-            (Some(api_key), Some(KeySource::Seed(seed))) => {
-                Some(Credentials::from_seed(api_key, seed))
-            }
-            (None, None) => None,
-            (Some(_), None) => {
-                return Err(Error::configuration(
-                    "an API key was provided but no private key; call private_key_pem or private_key_bytes",
-                ));
-            }
-            (None, Some(_)) => {
-                return Err(Error::configuration(
-                    "a private key was provided but no API key; call api_key",
-                ));
-            }
+        let signer: Option<Arc<dyn Signer>> = match signer {
+            Some(signer) => Some(signer),
+            None => match (api_key, key) {
+                (Some(api_key), Some(KeySource::Pem(pem))) => {
+                    Some(Arc::new(Ed25519Signer::from_pem(api_key, &pem)?))
+                }
+                (Some(api_key), Some(KeySource::Seed(seed))) => {
+                    Some(Arc::new(Ed25519Signer::from_seed(api_key, seed)))
+                }
+                (None, None) => None,
+                (Some(_), None) => {
+                    return Err(Error::configuration(
+                        "an API key was provided but no private key; call private_key_pem, private_key_bytes, or signer",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(Error::configuration(
+                        "a private key was provided but no API key; call api_key",
+                    ));
+                }
+            },
         };
 
-        let http_client = match self.http_client {
+        let http_client = match http_client {
             Some(client) => client,
             None => reqwest::Client::builder()
-                .timeout(self.timeout.unwrap_or(DEFAULT_TIMEOUT))
+                .timeout(timeout.unwrap_or(DEFAULT_TIMEOUT))
                 .build()
                 .map_err(|e| Error::configuration(format!("could not build HTTP client: {e}")))?,
         };
 
-        let transport = Transport::new(&base_url, http_client, credentials)?;
-        Ok(RevolutXClient { transport })
+        let executor = LocalExecutor::new(&base_url, http_client, signer)?;
+        Ok(RevolutXClient {
+            executor: Arc::new(executor),
+        })
     }
+}
+
+fn preview(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= MAX_BODY_PREVIEW {
+        return text.into_owned();
+    }
+    let mut end = MAX_BODY_PREVIEW;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… ({} bytes total)", &text[..end], bytes.len())
 }
 
 #[cfg(test)]
@@ -251,6 +357,13 @@ mod tests {
             .private_key_bytes(TEST_SEED)
             .build()
             .unwrap();
+        assert!(client.is_authenticated());
+    }
+
+    #[test]
+    fn custom_signer_makes_client_authenticated() {
+        let signer = Arc::new(Ed25519Signer::from_seed("key", TEST_SEED));
+        let client = RevolutXClient::builder().signer(signer).build().unwrap();
         assert!(client.is_authenticated());
     }
 

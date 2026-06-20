@@ -54,7 +54,6 @@ impl<'a> TradesApi<'a> {
     pub async fn all(&self, symbol: &str, query: &TradesQuery) -> Result<Page<Trade>> {
         let path = format!("/trades/all/{}", encode_component(symbol));
         self.client
-            .transport()
             .send_json(RequestSpec::get(path).with_query(query.to_query()))
             .await
     }
@@ -64,7 +63,6 @@ impl<'a> TradesApi<'a> {
     pub async fn private(&self, symbol: &str, query: &TradesQuery) -> Result<Page<Fill>> {
         let path = format!("/trades/private/{}", encode_component(symbol));
         self.client
-            .transport()
             .send_json(RequestSpec::get(path).with_query(query.to_query()))
             .await
     }

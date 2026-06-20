@@ -101,10 +101,7 @@ impl<'a> MarketDataApi<'a> {
     /// `GET /order-book/{symbol}` — order book snapshot (authenticated).
     pub async fn order_book(&self, symbol: &str) -> Result<OrderBook> {
         let path = format!("/order-book/{}", encode_component(symbol));
-        self.client
-            .transport()
-            .send_json(RequestSpec::get(path))
-            .await
+        self.client.send_json(RequestSpec::get(path)).await
     }
 
     /// `GET /order-book/{symbol}?limit=` — order book snapshot capped at `limit`
@@ -112,7 +109,6 @@ impl<'a> MarketDataApi<'a> {
     pub async fn order_book_with_limit(&self, symbol: &str, limit: u32) -> Result<OrderBook> {
         let path = format!("/order-book/{}", encode_component(symbol));
         self.client
-            .transport()
             .send_json(RequestSpec::get(path).with_query(vec![("limit".into(), limit.to_string())]))
             .await
     }
@@ -121,10 +117,7 @@ impl<'a> MarketDataApi<'a> {
     /// (unauthenticated) endpoint.
     pub async fn public_order_book(&self, symbol: &str) -> Result<OrderBook> {
         let path = format!("/public/order-book/{}", encode_component(symbol));
-        self.client
-            .transport()
-            .send_json(RequestSpec::get(path).public())
-            .await
+        self.client.send_json(RequestSpec::get(path).public()).await
     }
 
     /// `GET /candles/{symbol}` — historical OHLCV candles.
@@ -132,7 +125,6 @@ impl<'a> MarketDataApi<'a> {
         let path = format!("/candles/{}", encode_component(symbol));
         let data: Data<Vec<Candle>> = self
             .client
-            .transport()
             .send_json(RequestSpec::get(path).with_query(query.to_query()))
             .await?;
         Ok(data.data)
@@ -140,10 +132,7 @@ impl<'a> MarketDataApi<'a> {
 
     /// `GET /tickers` — tickers for all trading pairs.
     pub async fn tickers(&self) -> Result<Tickers> {
-        self.client
-            .transport()
-            .send_json(RequestSpec::get("/tickers"))
-            .await
+        self.client.send_json(RequestSpec::get("/tickers")).await
     }
 
     /// `GET /tickers?symbols=` — tickers for the given trading pairs.
@@ -153,7 +142,6 @@ impl<'a> MarketDataApi<'a> {
             .map(|s| ("symbols".to_string(), s.as_ref().to_string()))
             .collect();
         self.client
-            .transport()
             .send_json(RequestSpec::get("/tickers").with_query(query))
             .await
     }
@@ -161,7 +149,6 @@ impl<'a> MarketDataApi<'a> {
     /// `GET /public/last-trades` — the latest public trades (unauthenticated).
     pub async fn last_trades(&self) -> Result<LastTrades> {
         self.client
-            .transport()
             .send_json(RequestSpec::get("/public/last-trades").public())
             .await
     }

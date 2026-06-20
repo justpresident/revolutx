@@ -17,6 +17,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   response model now round-trips through serde.
 - `config` module (`ClientConfig`, `client_from_env`) for building a client from
   CLI flags / `REVOLUTX_*` environment variables, under the `rest` feature.
+- Pluggable auth and transport seams: a `Signer` trait (default `Ed25519Signer`,
+  set via `ClientBuilder::signer`) for custom signing backends (encrypted
+  keystore, hardware token, remote signer), and a `RequestExecutor` trait
+  (default `LocalExecutor`, set via `ClientBuilder::executor` /
+  `RevolutXClient::with_executor`) for custom execution backends (e.g. a signing
+  agent in another process). The `transport` module, `RequestSpec`, and
+  `RawResponse` are now public. `ed25519-dalek`'s `zeroize` is enabled.
 
 ## [0.1.0] - 2026-06-19
 

@@ -80,8 +80,10 @@ pub mod fix;
 #[cfg(feature = "rest")]
 mod auth;
 #[cfg(feature = "rest")]
-mod transport;
+pub mod transport;
 
+#[cfg(feature = "rest")]
+pub use auth::{Ed25519Signer, Signer};
 #[cfg(feature = "rest")]
 pub use client::{ClientBuilder, Environment, RevolutXClient};
 #[cfg(feature = "rest")]
@@ -90,6 +92,8 @@ pub use error::{ApiError, ApiErrorKind, Error, Result};
 pub use model::Page;
 pub use model::common::{ClientOrderId, OrderId, Price, Quantity, Side, Symbol, Timestamp};
 pub use rust_decimal::Decimal;
+#[cfg(feature = "rest")]
+pub use transport::{LocalExecutor, RawResponse, RequestExecutor, RequestSpec};
 
 #[cfg(all(test, feature = "rest"))]
 mod tests {

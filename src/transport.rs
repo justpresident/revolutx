@@ -1,34 +1,37 @@
-//! Internal HTTP transport.
+//! Request execution and the pluggable transport seam.
 //!
-//! This layer owns base-URL/path joining, deterministic query and body
-//! construction, request signing, sending via `reqwest`, and response
-//! classification. Endpoint modules build a [`RequestSpec`] and call
-//! [`Transport::send_json`] / [`Transport::send_no_content`]; they never touch
-//! auth headers or HTTP details directly.
+//! Endpoint modules build a [`RequestSpec`]; a [`RequestExecutor`] turns it into
+//! a [`RawResponse`]. [`LocalExecutor`] (the default) owns base-URL/path joining,
+//! deterministic query/body construction, signing (via a [`crate::Signer`]), and
+//! sending over `reqwest`. A custom executor can forward the request elsewhere
+//! (e.g. to a signing agent), which is how a thin client delegates all signing
+//! and HTTP to another process.
 //!
 //! The query string and JSON body are built once and reused for both signing
 //! and transmission, guaranteeing the signature covers exactly the bytes sent.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::{CONTENT_TYPE, HeaderMap, RETRY_AFTER};
 use reqwest::{Client as HttpClient, Method, Url};
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 
-use crate::auth::{
-    API_KEY_HEADER, Credentials, SIGNATURE_HEADER, TIMESTAMP_HEADER, signing_message,
-};
-use crate::error::{Error, Result, classify_error_response};
+use crate::auth::{API_KEY_HEADER, SIGNATURE_HEADER, Signer, TIMESTAMP_HEADER, signing_message};
+use crate::error::{Error, Result};
 
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
-const MAX_BODY_PREVIEW: usize = 2048;
 
-/// A fully-described request, independent of HTTP transport details.
-pub(crate) struct RequestSpec {
+/// A fully-described request, independent of how it is executed.
+///
+/// Built by the endpoint modules and consumed by a [`RequestExecutor`]. The
+/// accessors let a custom executor inspect or forward the request.
+pub struct RequestSpec {
     method: Method,
     /// Path relative to the configured base URL (which already includes
-    /// `/api/1.0`), e.g. `/orders/active`. Path parameters must be
+    /// `/api/1.0`), e.g. `/orders/active`. Path parameters are
     /// percent-encoded by the caller.
     path: String,
     query: Vec<(String, String)>,
@@ -85,25 +88,79 @@ impl RequestSpec {
         self.requires_auth = false;
         self
     }
+
+    /// The HTTP method.
+    pub fn method(&self) -> &Method {
+        &self.method
+    }
+
+    /// The path relative to the base URL.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The ordered query parameters.
+    pub fn query(&self) -> &[(String, String)] {
+        &self.query
+    }
+
+    /// The request body, if any.
+    pub fn body(&self) -> Option<&[u8]> {
+        self.body.as_deref()
+    }
+
+    /// Whether the request must be authenticated.
+    pub fn requires_auth(&self) -> bool {
+        self.requires_auth
+    }
 }
 
-/// Shared HTTP transport for the SDK.
+/// A raw response from a [`RequestExecutor`]: status, parsed `Retry-After`, and
+/// body bytes. The client layer turns this into typed results or classified
+/// errors.
 #[derive(Debug, Clone)]
-pub(crate) struct Transport {
+pub struct RawResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// `Retry-After` delay, parsed from the header on rate-limit responses.
+    pub retry_after: Option<Duration>,
+    /// Raw response body.
+    pub body: Vec<u8>,
+}
+
+/// A boxed, `Send` future — the return type of [`RequestExecutor::execute`].
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Executes a [`RequestSpec`] and returns a [`RawResponse`] — the pluggable
+/// transport seam.
+///
+/// [`LocalExecutor`] signs and sends over HTTP; a remote/agent executor can
+/// forward the request to another process. A [`crate::RevolutXClient`] is built
+/// over an `Arc<dyn RequestExecutor>`.
+pub trait RequestExecutor: Send + Sync {
+    /// Executes the request.
+    fn execute<'a>(&'a self, request: RequestSpec) -> BoxFuture<'a, Result<RawResponse>>;
+    /// The base URL requests target.
+    fn base_url(&self) -> &str;
+    /// Whether this executor can authenticate (has a signer / credentials).
+    fn is_authenticated(&self) -> bool;
+}
+
+/// The default executor: signs each request (via a [`Signer`]) and sends it over
+/// HTTP with `reqwest`.
+#[derive(Clone)]
+pub struct LocalExecutor {
     http: HttpClient,
     base_url: Url,
     /// Path portion of the base URL with no trailing slash, e.g. `/api/1.0`.
     base_path: String,
-    credentials: Option<Credentials>,
+    signer: Option<Arc<dyn Signer>>,
 }
 
-impl Transport {
-    /// Builds a transport for the given base URL.
-    pub(crate) fn new(
-        base_url: &str,
-        http: HttpClient,
-        credentials: Option<Credentials>,
-    ) -> Result<Self> {
+impl LocalExecutor {
+    /// Builds an executor for the given base URL and optional signer. Without a
+    /// signer, only public (unauthenticated) requests succeed.
+    pub fn new(base_url: &str, http: HttpClient, signer: Option<Arc<dyn Signer>>) -> Result<Self> {
         let url = Url::parse(base_url)
             .map_err(|e| Error::configuration(format!("invalid base URL '{base_url}': {e}")))?;
         if url.cannot_be_a_base() {
@@ -116,62 +173,11 @@ impl Transport {
             http,
             base_url: url,
             base_path,
-            credentials,
+            signer,
         })
     }
 
-    /// Returns the configured base URL as a string.
-    pub(crate) fn base_url(&self) -> &str {
-        self.base_url.as_str()
-    }
-
-    /// Returns whether the transport was configured with API credentials.
-    pub(crate) fn has_credentials(&self) -> bool {
-        self.credentials.is_some()
-    }
-
-    /// Sends a request and deserializes a successful JSON response into `T`.
-    pub(crate) async fn send_json<T: DeserializeOwned>(&self, spec: RequestSpec) -> Result<T> {
-        let method = spec.method.as_str().to_owned();
-        let full_path = format!("{}{}", self.base_path, spec.path);
-        let response = self.send(&spec).await?;
-        let status = response.status();
-        let retry_after = parse_retry_after(response.headers());
-        let bytes = response.bytes().await.map_err(Error::Transport)?;
-
-        if status.is_success() {
-            serde_json::from_slice::<T>(bytes.as_ref()).map_err(|source| Error::Deserialize {
-                method,
-                path: full_path,
-                source,
-                body: preview(bytes.as_ref()),
-            })
-        } else {
-            Err(classify_error_response(
-                status.as_u16(),
-                retry_after,
-                bytes.as_ref(),
-            ))
-        }
-    }
-
-    /// Sends a request that is expected to return no content (HTTP 204).
-    pub(crate) async fn send_no_content(&self, spec: RequestSpec) -> Result<()> {
-        let response = self.send(&spec).await?;
-        let status = response.status();
-        let retry_after = parse_retry_after(response.headers());
-        if status.is_success() {
-            return Ok(());
-        }
-        let bytes = response.bytes().await.map_err(Error::Transport)?;
-        Err(classify_error_response(
-            status.as_u16(),
-            retry_after,
-            bytes.as_ref(),
-        ))
-    }
-
-    async fn send(&self, spec: &RequestSpec) -> Result<reqwest::Response> {
+    async fn send(&self, spec: RequestSpec) -> Result<RawResponse> {
         let method_token = spec.method.as_str();
         let full_path = format!("{}{}", self.base_path, spec.path);
         let query = build_query(&spec.query);
@@ -181,8 +187,8 @@ impl Transport {
         url.set_path(&full_path);
         url.set_query(if query.is_empty() { None } else { Some(&query) });
 
-        // Our pre-encoding must survive `url` normalization unchanged, so that
-        // the bytes we signed are exactly the bytes on the wire.
+        // Our pre-encoding must survive `url` normalization unchanged, so the
+        // bytes we signed are exactly the bytes on the wire.
         debug_assert_eq!(url.path(), full_path, "path changed during URL assembly");
         debug_assert_eq!(
             url.query().unwrap_or(""),
@@ -193,12 +199,12 @@ impl Transport {
         let mut request = self.http.request(spec.method.clone(), url);
 
         if spec.requires_auth {
-            let credentials = self.credentials.as_ref().ok_or(Error::MissingCredentials)?;
+            let signer = self.signer.as_ref().ok_or(Error::MissingCredentials)?;
             let timestamp = now_unix_millis();
             let message = signing_message(timestamp, method_token, &full_path, &query, body);
-            let signature = credentials.sign(&message);
+            let signature = signer.sign(&message)?;
             request = request
-                .header(API_KEY_HEADER, credentials.api_key())
+                .header(API_KEY_HEADER, signer.api_key().as_ref())
                 .header(TIMESTAMP_HEADER, timestamp.to_string())
                 .header(SIGNATURE_HEADER, signature);
         }
@@ -209,7 +215,38 @@ impl Transport {
                 .body(body.clone());
         }
 
-        request.send().await.map_err(Error::Transport)
+        let response = request.send().await.map_err(Error::Transport)?;
+        let status = response.status().as_u16();
+        let retry_after = parse_retry_after(response.headers());
+        let bytes = response.bytes().await.map_err(Error::Transport)?;
+        Ok(RawResponse {
+            status,
+            retry_after,
+            body: bytes.to_vec(),
+        })
+    }
+}
+
+impl RequestExecutor for LocalExecutor {
+    fn execute<'a>(&'a self, request: RequestSpec) -> BoxFuture<'a, Result<RawResponse>> {
+        Box::pin(async move { self.send(request).await })
+    }
+
+    fn base_url(&self) -> &str {
+        self.base_url.as_str()
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.signer.is_some()
+    }
+}
+
+impl std::fmt::Debug for LocalExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalExecutor")
+            .field("base_url", &self.base_url.as_str())
+            .field("authenticated", &self.signer.is_some())
+            .finish()
     }
 }
 
@@ -266,18 +303,6 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
         .map(Duration::from_millis)
 }
 
-fn preview(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    if text.len() <= MAX_BODY_PREVIEW {
-        return text.into_owned();
-    }
-    let mut end = MAX_BODY_PREVIEW;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}… ({} bytes total)", &text[..end], bytes.len())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,15 +331,17 @@ mod tests {
     }
 
     #[test]
-    fn base_path_strips_trailing_slash() {
-        let t =
-            Transport::new("https://revx.revolut.com/api/1.0/", HttpClient::new(), None).unwrap();
-        assert_eq!(t.base_path, "/api/1.0");
-        assert!(!t.has_credentials());
+    fn base_path_strips_trailing_slash_and_reports_unauthenticated() {
+        let executor =
+            LocalExecutor::new("https://revx.revolut.com/api/1.0/", HttpClient::new(), None)
+                .unwrap();
+        assert_eq!(executor.base_path, "/api/1.0");
+        assert!(!executor.is_authenticated());
+        assert_eq!(executor.base_url(), "https://revx.revolut.com/api/1.0/");
     }
 
     #[test]
     fn rejects_invalid_base_url() {
-        assert!(Transport::new("not a url", HttpClient::new(), None).is_err());
+        assert!(LocalExecutor::new("not a url", HttpClient::new(), None).is_err());
     }
 }

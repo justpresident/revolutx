@@ -220,7 +220,6 @@ impl<'a> OrdersApi<'a> {
     pub async fn place(&self, request: &OrderPlacementRequest) -> Result<OrderAck> {
         let raw: RawAck = self
             .client
-            .transport()
             .send_json(RequestSpec::post_json("/orders", request)?)
             .await?;
         raw.into_ack()
@@ -235,7 +234,6 @@ impl<'a> OrdersApi<'a> {
         let path = format!("/orders/{}", encode_component(id.as_str()));
         let raw: RawAck = self
             .client
-            .transport()
             .send_json(RequestSpec::put_json(path, request)?)
             .await?;
         raw.into_ack()
@@ -244,18 +242,13 @@ impl<'a> OrdersApi<'a> {
     /// `GET /orders/{id}` — fetches a single order, including fee details.
     pub async fn get(&self, id: &OrderId) -> Result<OrderDetails> {
         let path = format!("/orders/{}", encode_component(id.as_str()));
-        let data: Data<OrderDetails> = self
-            .client
-            .transport()
-            .send_json(RequestSpec::get(path))
-            .await?;
+        let data: Data<OrderDetails> = self.client.send_json(RequestSpec::get(path)).await?;
         Ok(data.data)
     }
 
     /// `GET /orders/active` — a page of currently active orders.
     pub async fn active(&self, query: &ActiveOrdersQuery) -> Result<Page<Order>> {
         self.client
-            .transport()
             .send_json(RequestSpec::get("/orders/active").with_query(query.to_query()))
             .await
     }
@@ -263,7 +256,6 @@ impl<'a> OrdersApi<'a> {
     /// `GET /orders/historical` — a page of historical orders.
     pub async fn historical(&self, query: &HistoricalOrdersQuery) -> Result<Page<Order>> {
         self.client
-            .transport()
             .send_json(RequestSpec::get("/orders/historical").with_query(query.to_query()))
             .await
     }
@@ -271,16 +263,12 @@ impl<'a> OrdersApi<'a> {
     /// `DELETE /orders/{id}` — cancels a single order.
     pub async fn cancel(&self, id: &OrderId) -> Result<()> {
         let path = format!("/orders/{}", encode_component(id.as_str()));
-        self.client
-            .transport()
-            .send_no_content(RequestSpec::delete(path))
-            .await
+        self.client.send_no_content(RequestSpec::delete(path)).await
     }
 
     /// `DELETE /orders` — cancels all active orders.
     pub async fn cancel_all(&self) -> Result<()> {
         self.client
-            .transport()
             .send_no_content(RequestSpec::delete("/orders"))
             .await
     }
@@ -288,11 +276,7 @@ impl<'a> OrdersApi<'a> {
     /// `GET /orders/fills/{id}` — the fills (executions) of an order.
     pub async fn fills(&self, id: &OrderId) -> Result<Vec<Fill>> {
         let path = format!("/orders/fills/{}", encode_component(id.as_str()));
-        let data: Data<Vec<Fill>> = self
-            .client
-            .transport()
-            .send_json(RequestSpec::get(path))
-            .await?;
+        let data: Data<Vec<Fill>> = self.client.send_json(RequestSpec::get(path)).await?;
         Ok(data.data)
     }
 }
