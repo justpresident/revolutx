@@ -31,6 +31,8 @@ rest = ["dep:reqwest", "dep:ed25519-dalek", "dep:base64", "dep:zeroize"]
 # FIX 4.4 client (market data + trading). Not yet implemented; reserved so the
 # feature/module layout is in place. See the `fix` backlog task.
 fix = []
+# Encrypted credential vault (rcypher) exposed as a `Signer`. Implies `rest`.
+keystore = ["rest", "dep:rcypher", "zeroize/derive"]
 
 [dependencies]
 # Shared, always-on: domain models, error types, (de)serialization.
@@ -45,9 +47,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "pem", "pkcs8", "zeroize"], optional = true }
 base64 = { version = "0.22", optional = true }
 zeroize = { version = "1", optional = true }
+rcypher = { version = "0.2", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
 
 [package.metadata.docs.rs]
 all-features = true

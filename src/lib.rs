@@ -68,6 +68,8 @@ pub mod client;
 #[cfg(feature = "rest")]
 pub mod config;
 pub mod error;
+#[cfg(feature = "keystore")]
+pub mod keystore;
 pub mod model;
 
 /// FIX 4.4 client (market data and trading). Enabled by the `fix` feature.
@@ -83,12 +85,14 @@ mod auth;
 pub mod transport;
 
 #[cfg(feature = "rest")]
-pub use auth::{Ed25519Signer, Signer};
+pub use auth::{Ed25519Signer, RequestAuth, Signer};
 #[cfg(feature = "rest")]
 pub use client::{ClientBuilder, Environment, RevolutXClient};
 #[cfg(feature = "rest")]
 pub use config::{ClientConfig, ConfigError, client_from_env};
 pub use error::{ApiError, ApiErrorKind, Error, Result};
+#[cfg(feature = "keystore")]
+pub use keystore::{Keystore, KeystoreError, KeystoreOptions};
 pub use model::Page;
 pub use model::common::{ClientOrderId, OrderId, Price, Quantity, Side, Symbol, Timestamp};
 pub use rust_decimal::Decimal;

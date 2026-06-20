@@ -202,14 +202,14 @@ impl LocalExecutor {
             let signer = self.signer.as_ref().ok_or(Error::MissingCredentials)?;
             let timestamp = now_unix_millis();
             let message = signing_message(timestamp, method_token, &full_path, &query, body);
-            let signature = signer.sign(&message)?;
-            // `api_key` is `Zeroizing`: it is wiped when this block ends, after
-            // reqwest has copied it into the header.
-            let api_key = signer.api_key();
+            // One call → one decrypt for a keystore signer. `auth.api_key` is
+            // `Zeroizing` and is wiped when this block ends, after reqwest has
+            // copied it into the header.
+            let auth = signer.authenticate(&message)?;
             request = request
-                .header(API_KEY_HEADER, api_key.as_str())
+                .header(API_KEY_HEADER, auth.api_key.as_str())
                 .header(TIMESTAMP_HEADER, timestamp.to_string())
-                .header(SIGNATURE_HEADER, signature);
+                .header(SIGNATURE_HEADER, auth.signature);
         }
 
         if let Some(body) = &spec.body {

@@ -35,26 +35,28 @@ pub(crate) const TIMESTAMP_HEADER: &str = "X-Revx-Timestamp";
 /// Header carrying the base64-encoded Ed25519 signature.
 pub(crate) const SIGNATURE_HEADER: &str = "X-Revx-Signature";
 
-/// Authenticates Revolut X requests: supplies the API key and signs the
-/// canonical message.
-///
-/// The transport calls [`Signer::api_key`] and [`Signer::sign`] **once per
-/// request**, so an implementation may fetch or decrypt key material on demand
-/// (and zeroize it immediately after). The default implementation is
-/// [`Ed25519Signer`], which keeps the key in memory; custom implementations can
-/// back the signing with an encrypted keystore, a hardware token, or a remote
-/// signer.
-pub trait Signer: Send + Sync {
-    /// The API key to send in the `X-Revx-API-Key` header.
-    ///
-    /// Returned in a [`Zeroizing`] wrapper so the caller's copy is wiped from
-    /// memory on drop — a decrypting signer can hand back freshly-decrypted key
-    /// material and have it cleared right after the header is set.
-    fn api_key(&self) -> Zeroizing<String>;
+/// The authentication material for a single request.
+pub struct RequestAuth {
+    /// Value for the `X-Revx-API-Key` header. Held in a [`Zeroizing`] wrapper so
+    /// the caller's copy is wiped on drop, right after it is written to the
+    /// header — important for a signer that decrypts the key on demand.
+    pub api_key: Zeroizing<String>,
+    /// Value for the `X-Revx-Signature` header (base64). Public — it is sent on
+    /// the wire and reveals nothing about the key — so it is not zeroized.
+    pub signature: String,
+}
 
-    /// Signs the canonical message, returning the base64-encoded signature. The
-    /// signature is public (sent on the wire), so it is not zeroized.
-    fn sign(&self, message: &[u8]) -> Result<String>;
+/// Authenticates Revolut X requests.
+///
+/// [`Signer::authenticate`] is called **once per request**, returning the API
+/// key and the signature together. A decrypting implementation therefore needs
+/// only a single decrypt per request and can wipe the plaintext immediately
+/// after. The default implementation is [`Ed25519Signer`] (key held in memory);
+/// custom implementations can back it with an encrypted keystore, a hardware
+/// token, or a remote signer.
+pub trait Signer: Send + Sync {
+    /// Produces the API key and signature for the request's canonical `message`.
+    fn authenticate(&self, message: &[u8]) -> Result<RequestAuth>;
 }
 
 /// The default [`Signer`]: holds the API key and the Ed25519 signing key in
@@ -88,13 +90,11 @@ impl Ed25519Signer {
 }
 
 impl Signer for Ed25519Signer {
-    fn api_key(&self) -> Zeroizing<String> {
-        self.api_key.clone()
-    }
-
-    fn sign(&self, message: &[u8]) -> Result<String> {
-        let signature = self.signing_key.sign(message);
-        Ok(BASE64.encode(signature.to_bytes()))
+    fn authenticate(&self, message: &[u8]) -> Result<RequestAuth> {
+        Ok(RequestAuth {
+            api_key: self.api_key.clone(),
+            signature: BASE64.encode(self.signing_key.sign(message).to_bytes()),
+        })
     }
 }
 
@@ -202,9 +202,10 @@ mod tests {
     #[test]
     fn pem_key_signs_to_known_signature() {
         let creds = Ed25519Signer::from_pem("api-key", TEST_PEM).unwrap();
-        assert_eq!(creds.api_key().as_str(), "api-key");
         let msg = signing_message(1_700_000_000_000, "GET", "/api/1.0/balances", "", b"");
-        assert_eq!(creds.sign(&msg).unwrap(), GET_BALANCES_SIG);
+        let auth = creds.authenticate(&msg).unwrap();
+        assert_eq!(auth.api_key.as_str(), "api-key");
+        assert_eq!(auth.signature, GET_BALANCES_SIG);
     }
 
     #[test]
@@ -212,8 +213,11 @@ mod tests {
         let pem = Ed25519Signer::from_pem("k", TEST_PEM).unwrap();
         let seed = Ed25519Signer::from_seed("k", TEST_SEED);
         let msg = signing_message(1_700_000_000_000, "GET", "/api/1.0/balances", "", b"");
-        assert_eq!(seed.sign(&msg).unwrap(), pem.sign(&msg).unwrap());
-        assert_eq!(seed.sign(&msg).unwrap(), GET_BALANCES_SIG);
+        assert_eq!(
+            seed.authenticate(&msg).unwrap().signature,
+            pem.authenticate(&msg).unwrap().signature
+        );
+        assert_eq!(seed.authenticate(&msg).unwrap().signature, GET_BALANCES_SIG);
     }
 
     #[test]
@@ -226,13 +230,13 @@ mod tests {
             "",
             POST_ORDERS_BODY.as_bytes(),
         );
-        assert_eq!(creds.sign(&msg).unwrap(), POST_ORDERS_SIG);
+        assert_eq!(creds.authenticate(&msg).unwrap().signature, POST_ORDERS_SIG);
     }
 
     #[test]
     fn signature_is_valid_base64_of_64_bytes() {
         let creds = Ed25519Signer::from_seed("k", TEST_SEED);
-        let sig = creds.sign(b"anything").unwrap();
+        let sig = creds.authenticate(b"anything").unwrap().signature;
         let bytes = BASE64.decode(sig).unwrap();
         assert_eq!(bytes.len(), 64);
     }
