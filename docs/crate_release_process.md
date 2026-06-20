@@ -13,6 +13,11 @@ out.
 crate on crates.io (`cargo publish`, manual). The GitHub release is just notes
 (the changelog section) — there are no binaries to build or attach.
 
+This repo is a **workspace** with dependent crates (`revolutx-mcp`, and any
+future `revolutx-*`) that depend on `revolutx`. Releasing `revolutx` has a
+knock-on effect on their version requirements — see
+[Workspace dependencies](#workspace-dependencies) before you publish.
+
 ## Pre-flight
 
 0. Be on `master`, up to date, with a clean working tree and CI green on the last
@@ -71,7 +76,8 @@ crate on crates.io (`cargo publish`, manual). The GitHub release is just notes
 7. Decide the new version from the review above (pre-1.0 semver: breaking changes
    bump the **minor**, features/fixes bump the **patch**; the first release is
    `0.1.0`). Set `version` in `Cargo.toml`, then run `cargo build` so `Cargo.lock`
-   picks up the new `revolutx` version.
+   picks up the new `revolutx` version. Then check the dependent crates — see
+   [Workspace dependencies](#workspace-dependencies) below.
 8. Commit the bump and changelog first (so the tree is clean), then verify the
    package without `--allow-dirty` (which would validate a tarball containing
    uncommitted changes you'll never tag):
@@ -82,6 +88,39 @@ crate on crates.io (`cargo publish`, manual). The GitHub release is just notes
    `cargo package --list` must show only intended files — no `revolut-openapi/`,
    no `.taska/`, no `.github/`. The verify build compiles the lib only and does
    not need the submodule.
+
+## Workspace dependencies
+
+The crates in this workspace depend on each other by **both** `path` and
+`version` — e.g. `revolutx-mcp` has:
+
+```toml
+revolutx = { path = "..", version = "0.1" }
+```
+
+The `path` is only used for local/workspace builds; the **`version` requirement
+is what gets enforced once the crate is published** (cargo strips the `path` on
+publish). So every time you release `revolutx`, you must check each crate that
+depends on it and update it deliberately — these requirements do **not** update
+themselves:
+
+1. Decide whether the dependent relies on anything introduced in *this* release.
+2. If it does, bump that crate's `revolutx` `version` requirement to the version
+   you're releasing, and publish the dependent **after** `revolutx` is live
+   (dependency before dependents). A requirement that's too loose (e.g. `"0.1"`)
+   would let the *published* dependent resolve against an older `revolutx` it
+   cannot actually compile against — a broken `cargo install`.
+3. If it doesn't, leave the requirement, but confirm it still resolves.
+
+The next `revolutx` version is **not predetermined** — it might be a patch
+(`0.1.1`) or a minor (`0.2.0`) depending on what's shipping — so bump the
+dependents to whatever you actually choose here, never an assumed number.
+
+> **Current example:** `revolutx-mcp` uses the `Serialize` impls on the response
+> wrapper types (`OrderBook`, `Tickers`, `LastTrades`, `Page<T>`) that landed
+> *after* `revolutx` 0.1.0. It therefore cannot be published until the next
+> `revolutx` release, and its requirement must be bumped from `"0.1"` to that
+> version (whatever it turns out to be) at that time.
 
 ## Commit, tag, push
 
