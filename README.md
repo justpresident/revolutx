@@ -42,6 +42,21 @@ revolutx = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
+## Cargo features
+
+| Feature | Default | What it enables |
+|---|---|---|
+| `rest` | ✅ | The REST API: Ed25519-signed HTTP client and all endpoint groups (pulls `reqwest` + Ed25519). |
+| `fix` | — | FIX 4.4 client (market data + trading). **Reserved, not yet implemented.** |
+
+The domain models and error types are always available, independent of features.
+A FIX-only consumer (e.g. a market maker) can drop the HTTP/TLS dependency tree
+entirely:
+
+```toml
+revolutx = { version = "0.1", default-features = false, features = ["fix"] }
+```
+
 ## Generating an API key
 
 Create an Ed25519 key pair and register the public key in the

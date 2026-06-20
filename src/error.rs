@@ -54,6 +54,7 @@ pub enum Error {
 
     /// The HTTP request failed at the transport layer (DNS, TLS, connection, or
     /// timeout). The original `reqwest` error is preserved as the source.
+    #[cfg(feature = "rest")]
     #[error("transport error: {0}")]
     Transport(#[source] reqwest::Error),
 
@@ -92,12 +93,14 @@ pub enum Error {
 }
 
 impl Error {
+    #[cfg(feature = "rest")]
     pub(crate) fn configuration(message: impl Into<String>) -> Self {
         Self::Configuration {
             message: message.into(),
         }
     }
 
+    #[cfg(feature = "rest")]
     pub(crate) fn key(message: impl Into<String>) -> Self {
         Self::Key {
             message: message.into(),
@@ -212,6 +215,7 @@ pub enum ApiErrorKind {
     Other,
 }
 
+#[cfg(feature = "rest")]
 impl ApiErrorKind {
     fn from_status(status: u16) -> Self {
         match status {
@@ -244,6 +248,7 @@ impl std::fmt::Display for ApiErrorKind {
 }
 
 /// The wire shape of a Revolut X error payload (`ErrorResponse` schema).
+#[cfg(feature = "rest")]
 #[derive(Debug, serde::Deserialize)]
 struct ErrorPayload {
     #[serde(default)]
@@ -254,8 +259,10 @@ struct ErrorPayload {
     timestamp: Option<i64>,
 }
 
+#[cfg(feature = "rest")]
 const MAX_BODY_PREVIEW: usize = 2048;
 
+#[cfg(feature = "rest")]
 fn truncate_body(body: &str) -> String {
     if body.len() <= MAX_BODY_PREVIEW {
         body.to_owned()
@@ -272,6 +279,7 @@ fn truncate_body(body: &str) -> String {
 ///
 /// If the body parses as the documented error payload, an [`Error::Api`] is
 /// produced; otherwise an [`Error::Unexpected`] preserves the raw body.
+#[cfg(feature = "rest")]
 pub(crate) fn classify_error_response(
     status: u16,
     retry_after: Option<Duration>,
@@ -297,6 +305,7 @@ pub(crate) fn classify_error_response(
     }
 }
 
+#[cfg(feature = "rest")]
 fn reason_phrase(status: u16) -> &'static str {
     match status {
         400 => "Bad Request",
@@ -310,7 +319,7 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rest"))]
 mod tests {
     use super::*;
 

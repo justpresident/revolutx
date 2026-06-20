@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Cargo features: `rest` (default) gates the REST client; `fix` is reserved for
+  a future FIX 4.4 client. The REST dependency tree (`reqwest`, Ed25519) is now
+  optional, so a `default-features = false, features = ["fix"]` build drops it.
+  The domain models and error types remain available regardless of features.
+- `Serialize` for the response wrapper types `OrderBook`, `Tickers`,
+  `LastTrades`, and `Page<T>` (they were `Deserialize`-only in 0.1.0), so every
+  response model now round-trips through serde.
+
 ## [0.1.0] - 2026-06-19
 
 Initial release. Licensed under Apache-2.0; MSRV 1.85 (edition 2024).

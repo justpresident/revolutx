@@ -57,6 +57,7 @@ impl<T> From<RawPage<T>> for Page<T> {
 }
 
 /// Internal helper for the common `{ "data": T }` response envelope.
+#[cfg(feature = "rest")]
 #[derive(Deserialize)]
 pub(crate) struct Data<T> {
     pub data: T,
@@ -65,6 +66,7 @@ pub(crate) struct Data<T> {
 /// Internal helper for fields the spec types as an object but whose examples
 /// sometimes wrap in a single-element array (the order placement/replacement
 /// `data` field). Accepts either shape.
+#[cfg(feature = "rest")]
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub(crate) enum OneOrMany<T> {
@@ -72,6 +74,7 @@ pub(crate) enum OneOrMany<T> {
     Many(Vec<T>),
 }
 
+#[cfg(feature = "rest")]
 impl<T> OneOrMany<T> {
     pub(crate) fn into_first(self) -> Option<T> {
         match self {

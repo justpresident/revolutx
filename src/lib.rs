@@ -57,21 +57,37 @@
 //! signing, and error reporting only — it does not provide trading strategy or
 //! risk management.
 
+// The REST client (default `rest` feature): HTTP transport, Ed25519 signing,
+// and the endpoint groups. A build without `rest` (e.g. a future FIX-only
+// build) drops the `reqwest`/Ed25519 dependency tree and exposes only the
+// shared domain models and error types.
+#[cfg(feature = "rest")]
 pub mod api;
+#[cfg(feature = "rest")]
 pub mod client;
 pub mod error;
 pub mod model;
 
+/// FIX 4.4 client (market data and trading). Enabled by the `fix` feature.
+///
+/// Not yet implemented — this module is a placeholder so the feature and module
+/// layout are in place ahead of the FIX work (see the `fix` backlog task).
+#[cfg(feature = "fix")]
+pub mod fix;
+
+#[cfg(feature = "rest")]
 mod auth;
+#[cfg(feature = "rest")]
 mod transport;
 
+#[cfg(feature = "rest")]
 pub use client::{ClientBuilder, Environment, RevolutXClient};
 pub use error::{ApiError, ApiErrorKind, Error, Result};
 pub use model::Page;
 pub use model::common::{ClientOrderId, OrderId, Price, Quantity, Side, Symbol, Timestamp};
 pub use rust_decimal::Decimal;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rest"))]
 mod tests {
     use super::*;
 

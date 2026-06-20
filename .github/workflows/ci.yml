@@ -54,6 +54,28 @@ jobs:
       - name: Build
         run: cargo build --all-features
 
+  features:
+    name: feature matrix (revolutx)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      # The REST tree must stay optional: each non-default config must compile
+      # cleanly (no dead code) so a FIX-only consumer can drop reqwest/Ed25519.
+      - name: models only (--no-default-features)
+        run: cargo clippy -p revolutx --no-default-features -- -D warnings
+      - name: fix only
+        run: cargo clippy -p revolutx --no-default-features --features fix -- -D warnings
+      - name: all features
+        run: cargo clippy -p revolutx --all-features -- -D warnings
+
   coverage:
     name: code coverage
     runs-on: ubuntu-latest
