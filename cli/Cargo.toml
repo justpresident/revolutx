@@ -1,0 +1,24 @@
+[package]
+name = "revolutx-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Command-line interface for the Revolut X crypto exchange"
+readme = "README.md"
+repository = "https://github.com/justpresident/revolutx"
+keywords = ["revolut", "crypto", "exchange", "trading", "cli"]
+categories = ["command-line-utilities", "api-bindings"]
+
+[[bin]]
+name = "revolutx"
+path = "src/main.rs"
+
+[dependencies]
+revolutx = { path = "..", version = "0.1", features = ["rest", "keystore"] }
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+serde = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "time"] }
+zeroize = "1"
