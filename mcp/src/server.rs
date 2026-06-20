@@ -1,6 +1,6 @@
 //! MCP server: configuration and JSON-RPC request dispatch.
 
-use revolutx::{Environment, RevolutXClient};
+use revolutx::RevolutXClient;
 use serde_json::{Value, json};
 
 use crate::protocol::{
@@ -38,41 +38,8 @@ impl Server {
     ///   order-mutating tools.
     pub fn from_env() -> Result<Self, String> {
         let trading_enabled = env_flag("REVOLUTX_MCP_ENABLE_TRADING");
-
-        let environment = match env_nonempty("REVOLUTX_ENVIRONMENT").as_deref() {
-            Some("dev") | Some("development") => Environment::Dev,
-            _ => Environment::Production,
-        };
-
-        let mut builder = RevolutXClient::builder().environment(environment);
-
-        let api_key = env_nonempty("REVOLUTX_API_KEY");
-        let pem = match env_nonempty("REVOLUTX_PRIVATE_KEY_PEM") {
-            Some(pem) => Some(pem),
-            None => match env_nonempty("REVOLUTX_PRIVATE_KEY_PATH") {
-                Some(path) => Some(std::fs::read_to_string(&path).map_err(|e| {
-                    format!("could not read REVOLUTX_PRIVATE_KEY_PATH ({path}): {e}")
-                })?),
-                None => None,
-            },
-        };
-
-        match (api_key, pem) {
-            (Some(key), Some(pem)) => {
-                builder = builder.api_key(key).private_key_pem(pem);
-            }
-            (None, None) => {} // public-only client
-            (Some(_), None) => {
-                return Err("REVOLUTX_API_KEY is set but no private key was provided (set REVOLUTX_PRIVATE_KEY_PEM or REVOLUTX_PRIVATE_KEY_PATH)".to_string());
-            }
-            (None, Some(_)) => {
-                return Err(
-                    "a private key was provided but REVOLUTX_API_KEY is not set".to_string()
-                );
-            }
-        }
-
-        let client = builder.build().map_err(|e| e.to_string())?;
+        // Credential/environment loading is shared across the interface crates.
+        let client = revolutx_common::client_from_env().map_err(|e| e.to_string())?;
         Ok(Self {
             client,
             trading_enabled,

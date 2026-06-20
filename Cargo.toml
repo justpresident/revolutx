@@ -22,7 +22,7 @@ exclude = [
 ]
 
 [workspace]
-members = ["mcp"]
+members = ["common", "mcp"]
 
 [features]
 default = ["rest"]

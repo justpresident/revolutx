@@ -989,10 +989,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "revolutx-common"
+version = "0.1.0"
+dependencies = [
+ "revolutx",
+ "thiserror",
+]
+
+[[package]]
 name = "revolutx-mcp"
 version = "0.1.0"
 dependencies = [
  "revolutx",
+ "revolutx-common",
  "serde",
  "serde_json",
  "tokio",
