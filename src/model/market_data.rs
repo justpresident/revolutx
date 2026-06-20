@@ -98,7 +98,7 @@ struct RawTimestampMeta {
 
 impl From<RawOrderBook> for OrderBook {
     fn from(raw: RawOrderBook) -> Self {
-        OrderBook {
+        Self {
             asks: raw.data.asks,
             bids: raw.data.bids,
             timestamp: raw.metadata.timestamp,
@@ -165,7 +165,7 @@ struct RawTickers {
 
 impl From<RawTickers> for Tickers {
     fn from(raw: RawTickers) -> Self {
-        Tickers {
+        Self {
             tickers: raw.data,
             timestamp: raw.metadata.timestamp,
         }
@@ -239,7 +239,7 @@ struct RawLastTrades {
 
 impl From<RawLastTrades> for LastTrades {
     fn from(raw: RawLastTrades) -> Self {
-        LastTrades {
+        Self {
             trades: raw.data,
             timestamp: raw.metadata.timestamp,
         }

@@ -4,6 +4,24 @@
 //! Configuration is via environment variables (see [`server::Server::from_env`]).
 //! All diagnostics go to stderr; stdout carries only newline-delimited JSON-RPC
 //! messages, as required by the MCP stdio transport.
+#![warn(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::dbg_macro,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate
+)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::multiple_crate_versions,
+    clippy::missing_panics_doc
+)]
 
 mod protocol;
 mod server;

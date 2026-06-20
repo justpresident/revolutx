@@ -2,7 +2,7 @@
 //!
 //! Models represent trading concepts and API responses in an idiomatic Rust
 //! shape. They are handwritten rather than generated, and validated against the
-//! OpenAPI examples by the fixture tests.
+//! `OpenAPI` examples by the fixture tests.
 
 pub mod balances;
 pub mod common;
@@ -48,7 +48,7 @@ struct RawPageMeta {
 impl<T> From<RawPage<T>> for Page<T> {
     fn from(raw: RawPage<T>) -> Self {
         let next_cursor = raw.metadata.next_cursor.filter(|c| !c.is_empty());
-        Page {
+        Self {
             items: raw.data,
             next_cursor,
             timestamp: raw.metadata.timestamp,
@@ -78,8 +78,8 @@ pub(crate) enum OneOrMany<T> {
 impl<T> OneOrMany<T> {
     pub(crate) fn into_first(self) -> Option<T> {
         match self {
-            OneOrMany::One(value) => Some(value),
-            OneOrMany::Many(values) => values.into_iter().next(),
+            Self::One(value) => Some(value),
+            Self::Many(values) => values.into_iter().next(),
         }
     }
 }

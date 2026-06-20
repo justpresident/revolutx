@@ -11,7 +11,7 @@ pub struct BalancesApi<'a> {
 }
 
 impl<'a> BalancesApi<'a> {
-    pub(crate) fn new(client: &'a RevolutXClient) -> Self {
+    pub(crate) const fn new(client: &'a RevolutXClient) -> Self {
         Self { client }
     }
 

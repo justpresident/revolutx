@@ -41,18 +41,18 @@ impl CandleInterval {
     /// parameter.
     pub const fn minutes(self) -> i32 {
         match self {
-            CandleInterval::OneMinute => 1,
-            CandleInterval::FiveMinutes => 5,
-            CandleInterval::FifteenMinutes => 15,
-            CandleInterval::ThirtyMinutes => 30,
-            CandleInterval::OneHour => 60,
-            CandleInterval::FourHours => 240,
-            CandleInterval::OneDay => 1440,
-            CandleInterval::TwoDays => 2880,
-            CandleInterval::FourDays => 5760,
-            CandleInterval::OneWeek => 10080,
-            CandleInterval::TwoWeeks => 20160,
-            CandleInterval::FourWeeks => 40320,
+            Self::OneMinute => 1,
+            Self::FiveMinutes => 5,
+            Self::FifteenMinutes => 15,
+            Self::ThirtyMinutes => 30,
+            Self::OneHour => 60,
+            Self::FourHours => 240,
+            Self::OneDay => 1440,
+            Self::TwoDays => 2880,
+            Self::FourDays => 5760,
+            Self::OneWeek => 10080,
+            Self::TwoWeeks => 20160,
+            Self::FourWeeks => 40320,
         }
     }
 }
@@ -94,7 +94,7 @@ pub struct MarketDataApi<'a> {
 }
 
 impl<'a> MarketDataApi<'a> {
-    pub(crate) fn new(client: &'a RevolutXClient) -> Self {
+    pub(crate) const fn new(client: &'a RevolutXClient) -> Self {
         Self { client }
     }
 
@@ -136,7 +136,7 @@ impl<'a> MarketDataApi<'a> {
     }
 
     /// `GET /tickers?symbols=` — tickers for the given trading pairs.
-    pub async fn tickers_for<S: AsRef<str>>(&self, symbols: &[S]) -> Result<Tickers> {
+    pub async fn tickers_for<S: AsRef<str> + Sync>(&self, symbols: &[S]) -> Result<Tickers> {
         let query = symbols
             .iter()
             .map(|s| ("symbols".to_string(), s.as_ref().to_string()))

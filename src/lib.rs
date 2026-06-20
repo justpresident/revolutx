@@ -2,8 +2,8 @@
 //! exchange REST API.
 //!
 //! `revolutx` is a handwritten, domain-oriented SDK aimed at trading bots and
-//! automation. The local OpenAPI specification is used as a contract and
-//! regression-test source, but generated OpenAPI types are **not** part of the
+//! automation. The local `OpenAPI` specification is used as a contract and
+//! regression-test source, but generated `OpenAPI` types are **not** part of the
 //! public API. Prices, quantities, balances, and fees use
 //! [`rust_decimal::Decimal`] (re-exported as [`Decimal`]); they are never `f64`.
 //!
@@ -56,6 +56,25 @@
 //! controls, and credential security. The SDK handles API access, typing,
 //! signing, and error reporting only — it does not provide trading strategy or
 //! risk management.
+#![warn(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::dbg_macro,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate
+)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::multiple_crate_versions,
+    clippy::missing_panics_doc
+)]
 
 // The REST client (default `rest` feature): HTTP transport, Ed25519 signing,
 // and the endpoint groups. A build without `rest` (e.g. a future FIX-only
@@ -100,6 +119,7 @@ pub use rust_decimal::Decimal;
 pub use transport::{LocalExecutor, RawResponse, RequestExecutor, RequestSpec};
 
 #[cfg(all(test, feature = "rest"))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

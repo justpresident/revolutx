@@ -23,10 +23,10 @@ impl OrderType {
     /// The on-the-wire token for this order type.
     pub const fn as_str(self) -> &'static str {
         match self {
-            OrderType::Market => "market",
-            OrderType::Limit => "limit",
-            OrderType::Conditional => "conditional",
-            OrderType::Tpsl => "tpsl",
+            Self::Market => "market",
+            Self::Limit => "limit",
+            Self::Conditional => "conditional",
+            Self::Tpsl => "tpsl",
         }
     }
 }
@@ -55,13 +55,13 @@ impl OrderStatus {
     /// The on-the-wire token for this status.
     pub const fn as_str(self) -> &'static str {
         match self {
-            OrderStatus::PendingNew => "pending_new",
-            OrderStatus::New => "new",
-            OrderStatus::PartiallyFilled => "partially_filled",
-            OrderStatus::Filled => "filled",
-            OrderStatus::Cancelled => "cancelled",
-            OrderStatus::Rejected => "rejected",
-            OrderStatus::Replaced => "replaced",
+            Self::PendingNew => "pending_new",
+            Self::New => "new",
+            Self::PartiallyFilled => "partially_filled",
+            Self::Filled => "filled",
+            Self::Cancelled => "cancelled",
+            Self::Rejected => "rejected",
+            Self::Replaced => "replaced",
         }
     }
 }

@@ -17,6 +17,8 @@ const TRADING_DISABLED: &str = "trading is disabled; start the server with REVOL
 
 /// Returns the tool definitions exposed via `tools/list`, filtered by whether
 /// trading is enabled.
+// A flat, declarative catalog of tool schemas; splitting it would not aid clarity.
+#[allow(clippy::too_many_lines)]
 pub fn list(trading_enabled: bool) -> Vec<Value> {
     let mut tools = vec![
         tool(
@@ -186,6 +188,8 @@ pub fn list(trading_enabled: bool) -> Vec<Value> {
 
 /// Executes a tool call, returning the text payload on success or a
 /// human-readable error message on failure.
+// A flat dispatch over tool names; `side`/`size` are both core order terms.
+#[allow(clippy::too_many_lines, clippy::similar_names)]
 pub async fn call(
     client: &RevolutXClient,
     trading_enabled: bool,
@@ -341,7 +345,12 @@ pub async fn call(
 // --- helpers ---------------------------------------------------------------
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
-    json!({ "name": name, "description": description, "inputSchema": input_schema })
+    // `input_schema` is moved into the object rather than re-serialized.
+    let mut map = serde_json::Map::with_capacity(3);
+    map.insert("name".to_owned(), name.into());
+    map.insert("description".to_owned(), description.into());
+    map.insert("inputSchema".to_owned(), input_schema);
+    Value::Object(map)
 }
 
 fn symbol_schema(desc: &str) -> Value {
@@ -408,7 +417,9 @@ fn opt_i64(args: &Value, key: &str) -> Option<i64> {
 }
 
 fn opt_u32(args: &Value, key: &str) -> Option<u32> {
-    args.get(key).and_then(Value::as_u64).map(|n| n as u32)
+    args.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 fn opt_bool(args: &Value, key: &str) -> Option<bool> {
@@ -459,12 +470,11 @@ fn opt_side(args: &Value) -> Result<Option<Side>, String> {
 }
 
 fn opt_client_order_id(args: &Value) -> Result<Option<ClientOrderId>, String> {
-    match opt_str(args, "client_order_id") {
-        None => Ok(None),
-        Some(raw) => ClientOrderId::from_str(&raw)
+    opt_str(args, "client_order_id").map_or(Ok(None), |raw| {
+        ClientOrderId::from_str(&raw)
             .map(Some)
-            .map_err(|e| e.to_string()),
-    }
+            .map_err(|e| e.to_string())
+    })
 }
 
 fn opt_candle_interval(args: &Value) -> Result<Option<CandleInterval>, String> {
@@ -494,6 +504,7 @@ fn opt_candle_interval(args: &Value) -> Result<Option<CandleInterval>, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

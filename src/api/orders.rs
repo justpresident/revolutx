@@ -118,7 +118,7 @@ pub struct OrdersApi<'a> {
 }
 
 impl<'a> OrdersApi<'a> {
-    pub(crate) fn new(client: &'a RevolutXClient) -> Self {
+    pub(crate) const fn new(client: &'a RevolutXClient) -> Self {
         Self { client }
     }
 
@@ -302,6 +302,9 @@ pub struct LimitOrderBuilder<'a> {
 }
 
 impl<'a> LimitOrderBuilder<'a> {
+    // `side` (buy/sell) and `size` (quantity) are both core order terms; neither
+    // can be renamed without obscuring the domain.
+    #[allow(clippy::similar_names)]
     fn new(
         client: &'a RevolutXClient,
         symbol: impl Into<String>,
@@ -324,12 +327,14 @@ impl<'a> LimitOrderBuilder<'a> {
 
     /// Sets the client order id (idempotency key). A random one is generated if
     /// this is not called.
-    pub fn client_order_id(mut self, id: ClientOrderId) -> Self {
+    #[must_use]
+    pub const fn client_order_id(mut self, id: ClientOrderId) -> Self {
         self.client_order_id = Some(id);
         self
     }
 
     /// Replaces the execution instructions.
+    #[must_use]
     pub fn execution_instructions(
         mut self,
         instructions: impl IntoIterator<Item = ExecutionInstruction>,
@@ -339,11 +344,13 @@ impl<'a> LimitOrderBuilder<'a> {
     }
 
     /// Marks the order post-only (it will never take liquidity).
+    #[must_use]
     pub fn post_only(self) -> Self {
         self.execution_instructions([ExecutionInstruction::PostOnly])
     }
 
     /// Explicitly allows taker execution.
+    #[must_use]
     pub fn allow_taker(self) -> Self {
         self.execution_instructions([ExecutionInstruction::AllowTaker])
     }
@@ -393,6 +400,9 @@ pub struct MarketOrderBuilder<'a> {
 }
 
 impl<'a> MarketOrderBuilder<'a> {
+    // `side` (buy/sell) and `size` (quantity) are both core order terms; neither
+    // can be renamed without obscuring the domain.
+    #[allow(clippy::similar_names)]
     fn new(
         client: &'a RevolutXClient,
         symbol: impl Into<String>,
@@ -412,7 +422,8 @@ impl<'a> MarketOrderBuilder<'a> {
 
     /// Sets the client order id (idempotency key). A random one is generated if
     /// this is not called.
-    pub fn client_order_id(mut self, id: ClientOrderId) -> Self {
+    #[must_use]
+    pub const fn client_order_id(mut self, id: ClientOrderId) -> Self {
         self.client_order_id = Some(id);
         self
     }
@@ -465,6 +476,7 @@ impl RawAck {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::client::RevolutXClient;

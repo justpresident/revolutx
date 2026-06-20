@@ -115,33 +115,33 @@ impl Error {
 
     /// Returns the HTTP status code if this error originated from a server
     /// response.
-    pub fn status(&self) -> Option<u16> {
+    pub const fn status(&self) -> Option<u16> {
         match self {
-            Error::Api(api) => Some(api.status),
-            Error::Unexpected { status, .. } => Some(*status),
+            Self::Api(api) => Some(api.status),
+            Self::Unexpected { status, .. } => Some(*status),
             _ => None,
         }
     }
 
     /// Returns the structured API error, if any.
-    pub fn api_error(&self) -> Option<&ApiError> {
+    pub const fn api_error(&self) -> Option<&ApiError> {
         match self {
-            Error::Api(api) => Some(api),
+            Self::Api(api) => Some(api),
             _ => None,
         }
     }
 
     /// Returns `true` if the server reported a rate-limit (HTTP 429) error.
     pub fn is_rate_limited(&self) -> bool {
-        matches!(self, Error::Api(api) if api.kind == ApiErrorKind::RateLimited)
+        matches!(self, Self::Api(api) if api.kind == ApiErrorKind::RateLimited)
     }
 
     /// Returns `true` if the error is an authentication or authorization
     /// failure (HTTP 401 or 403), or a locally-detected missing credential.
-    pub fn is_auth_error(&self) -> bool {
+    pub const fn is_auth_error(&self) -> bool {
         match self {
-            Error::MissingCredentials => true,
-            Error::Api(api) => {
+            Self::MissingCredentials => true,
+            Self::Api(api) => {
                 matches!(
                     api.kind,
                     ApiErrorKind::Unauthorized | ApiErrorKind::Forbidden
@@ -217,16 +217,16 @@ pub enum ApiErrorKind {
 
 #[cfg(feature = "rest")]
 impl ApiErrorKind {
-    fn from_status(status: u16) -> Self {
+    const fn from_status(status: u16) -> Self {
         match status {
-            400 => ApiErrorKind::BadRequest,
-            401 => ApiErrorKind::Unauthorized,
-            403 => ApiErrorKind::Forbidden,
-            404 => ApiErrorKind::NotFound,
-            409 => ApiErrorKind::Conflict,
-            429 => ApiErrorKind::RateLimited,
-            500..=599 => ApiErrorKind::Server,
-            _ => ApiErrorKind::Other,
+            400 => Self::BadRequest,
+            401 => Self::Unauthorized,
+            403 => Self::Forbidden,
+            404 => Self::NotFound,
+            409 => Self::Conflict,
+            429 => Self::RateLimited,
+            500..=599 => Self::Server,
+            _ => Self::Other,
         }
     }
 }
@@ -234,14 +234,14 @@ impl ApiErrorKind {
 impl std::fmt::Display for ApiErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            ApiErrorKind::BadRequest => "bad request",
-            ApiErrorKind::Unauthorized => "unauthorized",
-            ApiErrorKind::Forbidden => "forbidden",
-            ApiErrorKind::NotFound => "not found",
-            ApiErrorKind::Conflict => "conflict",
-            ApiErrorKind::RateLimited => "rate limited",
-            ApiErrorKind::Server => "server error",
-            ApiErrorKind::Other => "error",
+            Self::BadRequest => "bad request",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden => "forbidden",
+            Self::NotFound => "not found",
+            Self::Conflict => "conflict",
+            Self::RateLimited => "rate limited",
+            Self::Server => "server error",
+            Self::Other => "error",
         };
         f.write_str(s)
     }
@@ -306,7 +306,7 @@ pub(crate) fn classify_error_response(
 }
 
 #[cfg(feature = "rest")]
-fn reason_phrase(status: u16) -> &'static str {
+const fn reason_phrase(status: u16) -> &'static str {
     match status {
         400 => "Bad Request",
         401 => "Unauthorized",
@@ -320,6 +320,7 @@ fn reason_phrase(status: u16) -> &'static str {
 }
 
 #[cfg(all(test, feature = "rest"))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -353,11 +354,11 @@ mod tests {
     fn detects_rate_limit_and_retry_after() {
         let err = classify_error_response(
             429,
-            Some(Duration::from_millis(5000)),
+            Some(Duration::from_secs(5)),
             br#"{"message":"Rate Limit Exceeded","error_id":"x"}"#,
         );
         assert!(err.is_rate_limited());
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(5000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
     }
 
     #[test]

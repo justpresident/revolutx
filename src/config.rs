@@ -126,6 +126,7 @@ fn parse_environment(value: &str) -> Option<Environment> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

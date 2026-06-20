@@ -320,7 +320,7 @@ fn confirm(yes: bool, action: &str) -> Res {
     }
 }
 
-fn side_of(side: SideArg) -> Side {
+const fn side_of(side: SideArg) -> Side {
     match side {
         SideArg::Buy => Side::Buy,
         SideArg::Sell => Side::Sell,
@@ -328,7 +328,10 @@ fn side_of(side: SideArg) -> Side {
 }
 
 fn candle_interval(minutes: i64) -> Result<CandleInterval, Box<dyn std::error::Error>> {
-    use CandleInterval::*;
+    use CandleInterval::{
+        FifteenMinutes, FiveMinutes, FourDays, FourHours, FourWeeks, OneDay, OneHour, OneMinute,
+        OneWeek, ThirtyMinutes, TwoDays, TwoWeeks,
+    };
     Ok(match minutes {
         1 => OneMinute,
         5 => FiveMinutes,

@@ -5,6 +5,24 @@
 //! because `enable_ptrace_protection` forks on Linux and forking a multithreaded
 //! process is undefined behavior. So this is a plain `fn main()` that hardens (for
 //! commands that touch secrets) and only then builds the Tokio runtime.
+#![warn(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::dbg_macro,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate
+)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::multiple_crate_versions,
+    clippy::missing_panics_doc
+)]
 
 mod args;
 mod commands;
@@ -47,7 +65,7 @@ fn main() -> ExitCode {
     // Resolve credentials (may prompt) before entering the async runtime.
     let client = match creds::client(&global, command.needs_secrets()) {
         Ok(client) => client,
-        Err(e) => return fail(e),
+        Err(e) => return fail(e.as_ref()),
     };
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -67,11 +85,11 @@ fn main() -> ExitCode {
 fn finish(result: Result<(), Box<dyn std::error::Error>>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => fail(e),
+        Err(e) => fail(e.as_ref()),
     }
 }
 
-fn fail(e: Box<dyn std::error::Error>) -> ExitCode {
+fn fail(e: &dyn std::error::Error) -> ExitCode {
     eprintln!("error: {e}");
     ExitCode::FAILURE
 }

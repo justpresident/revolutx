@@ -46,7 +46,7 @@ pub struct TradesApi<'a> {
 }
 
 impl<'a> TradesApi<'a> {
-    pub(crate) fn new(client: &'a RevolutXClient) -> Self {
+    pub(crate) const fn new(client: &'a RevolutXClient) -> Self {
         Self { client }
     }
 

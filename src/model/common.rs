@@ -74,7 +74,7 @@ impl TryFrom<String> for Symbol {
 impl<'de> Deserialize<'de> for Symbol {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        Symbol::new(raw).map_err(de::Error::custom)
+        Self::new(raw).map_err(de::Error::custom)
     }
 }
 
@@ -92,8 +92,8 @@ impl Side {
     /// The on-the-wire token for this side (`buy` or `sell`).
     pub const fn as_str(self) -> &'static str {
         match self {
-            Side::Buy => "buy",
-            Side::Sell => "sell",
+            Self::Buy => "buy",
+            Self::Sell => "sell",
         }
     }
 }
@@ -190,7 +190,7 @@ impl Default for ClientOrderId {
     /// Produces a fresh random (v4) client order id, suitable as a unique
     /// idempotency key.
     fn default() -> Self {
-        ClientOrderId::random()
+        Self::random()
     }
 }
 
@@ -315,7 +315,11 @@ impl Timestamp {
     }
 
     /// Returns the instant as Unix epoch milliseconds.
-    pub fn unix_millis(&self) -> i64 {
+    // Epoch milliseconds for any representable `OffsetDateTime` (max year 9999)
+    // fit in `i64`; the i128 -> i64 narrowing cannot lose information here, and a
+    // `const fn` cannot use `i64::try_from`.
+    #[allow(clippy::cast_possible_truncation)]
+    pub const fn unix_millis(&self) -> i64 {
         (self.0.unix_timestamp_nanos() / 1_000_000) as i64
     }
 
@@ -351,7 +355,7 @@ impl<'de> Deserialize<'de> for Timestamp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         struct TimestampVisitor;
 
-        impl<'de> Visitor<'de> for TimestampVisitor {
+        impl Visitor<'_> for TimestampVisitor {
             type Value = Timestamp;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -363,7 +367,9 @@ impl<'de> Deserialize<'de> for Timestamp {
             }
 
             fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<Timestamp, E> {
-                Ok(Timestamp::from_unix_millis(v as i64))
+                Ok(Timestamp::from_unix_millis(
+                    i64::try_from(v).unwrap_or(i64::MAX),
+                ))
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Timestamp, E> {
@@ -382,6 +388,8 @@ impl<'de> Deserialize<'de> for Timestamp {
 pub(crate) mod string_u64 {
     use serde::{Deserialize, Deserializer, Serializer};
 
+    // The `&u64` signature is mandated by serde's `serialize_with` contract.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(value)
     }
@@ -393,6 +401,7 @@ pub(crate) mod string_u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -433,7 +442,7 @@ mod tests {
     #[test]
     fn timestamp_accepts_millis_and_rfc3339() {
         let from_millis: Timestamp = serde_json::from_str("3318215482991").unwrap();
-        assert_eq!(from_millis.unix_millis(), 3318215482991);
+        assert_eq!(from_millis.unix_millis(), 3_318_215_482_991);
 
         let from_iso: Timestamp = serde_json::from_str("\"2025-08-08T21:40:35.133962Z\"").unwrap();
         assert_eq!(from_iso.datetime().year(), 2025);

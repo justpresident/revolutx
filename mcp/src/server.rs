@@ -21,7 +21,7 @@ pub struct Server {
 
 impl Server {
     #[cfg(test)]
-    pub fn new(client: RevolutXClient, trading_enabled: bool) -> Self {
+    pub const fn new(client: RevolutXClient, trading_enabled: bool) -> Self {
         Self {
             client,
             trading_enabled,
@@ -50,7 +50,7 @@ impl Server {
         self.client.is_authenticated()
     }
 
-    pub fn trading_enabled(&self) -> bool {
+    pub const fn trading_enabled(&self) -> bool {
         self.trading_enabled
     }
 
@@ -82,7 +82,7 @@ impl Server {
         let params = value.get("params").cloned().unwrap_or(Value::Null);
 
         let response = match method {
-            "initialize" => success(id, self.initialize_result(&params)),
+            "initialize" => success(id, Self::initialize_result(&params)),
             "ping" => success(id, json!({})),
             "tools/list" => success(id, json!({ "tools": tools::list(self.trading_enabled) })),
             "tools/call" => self.handle_tools_call(id, &params).await,
@@ -92,7 +92,7 @@ impl Server {
         Some(response.to_string())
     }
 
-    fn initialize_result(&self, params: &Value) -> Value {
+    fn initialize_result(params: &Value) -> Value {
         // Echo the client's requested protocol version when present.
         let protocol_version = params
             .get("protocolVersion")
@@ -136,11 +136,12 @@ fn env_nonempty(name: &str) -> Option<String> {
 fn env_flag(name: &str) -> bool {
     matches!(
         env_nonempty(name).as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
+        Some("1" | "true" | "yes" | "on")
     )
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

@@ -85,27 +85,27 @@ impl RevolutXClient {
     }
 
     /// Account balance endpoints.
-    pub fn balances(&self) -> BalancesApi<'_> {
+    pub const fn balances(&self) -> BalancesApi<'_> {
         BalancesApi::new(self)
     }
 
     /// Exchange configuration endpoints (currencies and pairs).
-    pub fn configuration(&self) -> ConfigurationApi<'_> {
+    pub const fn configuration(&self) -> ConfigurationApi<'_> {
         ConfigurationApi::new(self)
     }
 
     /// Market data endpoints (order books, candles, tickers, public trades).
-    pub fn market_data(&self) -> MarketDataApi<'_> {
+    pub const fn market_data(&self) -> MarketDataApi<'_> {
         MarketDataApi::new(self)
     }
 
     /// Order placement and management endpoints.
-    pub fn orders(&self) -> OrdersApi<'_> {
+    pub const fn orders(&self) -> OrdersApi<'_> {
         OrdersApi::new(self)
     }
 
     /// Trade history endpoints.
-    pub fn trades(&self) -> TradesApi<'_> {
+    pub const fn trades(&self) -> TradesApi<'_> {
         TradesApi::new(self)
     }
 
@@ -177,6 +177,7 @@ pub struct ClientBuilder {
 
 impl ClientBuilder {
     /// Sets the API key (the `X-Revx-API-Key` value).
+    #[must_use]
     pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
         self
@@ -184,6 +185,7 @@ impl ClientBuilder {
 
     /// Loads the Ed25519 private key from a PKCS#8 PEM string, as produced by
     /// `openssl genpkey -algorithm ed25519 -out private.pem`.
+    #[must_use]
     pub fn private_key_pem(mut self, pem: impl Into<String>) -> Self {
         self.key = Some(KeySource::Pem(pem.into()));
         self
@@ -191,6 +193,7 @@ impl ClientBuilder {
 
     /// Sets the Ed25519 private key from its raw 32-byte seed (for advanced
     /// users and tests).
+    #[must_use]
     pub fn private_key_bytes(mut self, seed: [u8; 32]) -> Self {
         self.key = Some(KeySource::Seed(seed));
         self
@@ -199,6 +202,7 @@ impl ClientBuilder {
     /// Supplies a custom [`Signer`] (e.g. an encrypted keystore or hardware
     /// token), overriding `api_key` / `private_key_*`. Combined with the
     /// configured base URL and HTTP client.
+    #[must_use]
     pub fn signer(mut self, signer: Arc<dyn Signer>) -> Self {
         self.signer = Some(signer);
         self
@@ -207,32 +211,37 @@ impl ClientBuilder {
     /// Supplies a fully custom [`RequestExecutor`] (e.g. an agent-backed
     /// transport). When set, the base URL, timeout, HTTP client, and signer are
     /// ignored — the executor is self-contained.
+    #[must_use]
     pub fn executor(mut self, executor: Arc<dyn RequestExecutor>) -> Self {
         self.executor = Some(executor);
         self
     }
 
     /// Selects a Revolut X environment. Ignored if a custom base URL is set.
-    pub fn environment(mut self, environment: Environment) -> Self {
+    #[must_use]
+    pub const fn environment(mut self, environment: Environment) -> Self {
         self.environment = Some(environment);
         self
     }
 
     /// Overrides the base URL (primarily for tests and advanced deployments).
     /// Must include the `/api/1.0` path prefix used by the signature.
+    #[must_use]
     pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = Some(base_url.into());
         self
     }
 
     /// Sets the request timeout. Ignored if a custom HTTP client is supplied.
-    pub fn timeout(mut self, timeout: Duration) -> Self {
+    #[must_use]
+    pub const fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
 
     /// Supplies a preconfigured [`reqwest::Client`], taking full control of
     /// transport settings (TLS, proxies, timeouts, connection pooling).
+    #[must_use]
     pub fn http_client(mut self, client: reqwest::Client) -> Self {
         self.http_client = Some(client);
         self
@@ -246,7 +255,7 @@ impl ClientBuilder {
 
     /// Builds the client, validating configuration and credentials.
     pub fn build(self) -> Result<RevolutXClient> {
-        let ClientBuilder {
+        let Self {
             api_key,
             key,
             signer,
@@ -319,6 +328,7 @@ fn preview(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

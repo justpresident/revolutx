@@ -22,7 +22,7 @@ pub struct GlobalOpts {
     /// Target environment.
     #[arg(long, global = true, value_enum, default_value_t = EnvArg::Production)]
     pub env: EnvArg,
-    /// Path to the encrypted vault (default: $XDG_CONFIG_HOME/revolutx/vault).
+    /// Path to the encrypted vault (default: $`XDG_CONFIG_HOME/revolutx/vault`).
     #[arg(long, global = true)]
     pub vault: Option<PathBuf>,
     /// Use plaintext credentials from the REVOLUTX_* environment variables
@@ -74,9 +74,9 @@ pub enum Command {
 
 impl Command {
     /// Whether the command needs credentials (and thus runtime hardening).
-    pub fn needs_secrets(&self) -> bool {
+    pub const fn needs_secrets(&self) -> bool {
         match self {
-            Command::Market { command } => !matches!(
+            Self::Market { command } => !matches!(
                 command,
                 MarketCmd::PublicOrderBook { .. } | MarketCmd::LastTrades
             ),

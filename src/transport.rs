@@ -84,13 +84,13 @@ impl RequestSpec {
     }
 
     /// Marks the request as a public (unauthenticated) endpoint.
-    pub(crate) fn public(mut self) -> Self {
+    pub(crate) const fn public(mut self) -> Self {
         self.requires_auth = false;
         self
     }
 
     /// The HTTP method.
-    pub fn method(&self) -> &Method {
+    pub const fn method(&self) -> &Method {
         &self.method
     }
 
@@ -110,7 +110,7 @@ impl RequestSpec {
     }
 
     /// Whether the request must be authenticated.
-    pub fn requires_auth(&self) -> bool {
+    pub const fn requires_auth(&self) -> bool {
         self.requires_auth
     }
 }
@@ -139,7 +139,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// over an `Arc<dyn RequestExecutor>`.
 pub trait RequestExecutor: Send + Sync {
     /// Executes the request.
-    fn execute<'a>(&'a self, request: RequestSpec) -> BoxFuture<'a, Result<RawResponse>>;
+    fn execute(&self, request: RequestSpec) -> BoxFuture<'_, Result<RawResponse>>;
     /// The base URL requests target.
     fn base_url(&self) -> &str;
     /// Whether this executor can authenticate (has a signer / credentials).
@@ -231,7 +231,7 @@ impl LocalExecutor {
 }
 
 impl RequestExecutor for LocalExecutor {
-    fn execute<'a>(&'a self, request: RequestSpec) -> BoxFuture<'a, Result<RawResponse>> {
+    fn execute(&self, request: RequestSpec) -> BoxFuture<'_, Result<RawResponse>> {
         Box::pin(async move { self.send(request).await })
     }
 
@@ -246,10 +246,12 @@ impl RequestExecutor for LocalExecutor {
 
 impl std::fmt::Debug for LocalExecutor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The HTTP client and signer are intentionally omitted (the signer can
+        // hold credential material); `finish_non_exhaustive` records that.
         f.debug_struct("LocalExecutor")
             .field("base_url", &self.base_url.as_str())
             .field("authenticated", &self.signer.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -260,7 +262,7 @@ pub(crate) fn encode_component(input: &str) -> String {
     for &b in input.as_bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
+                out.push(b as char);
             }
             _ => {
                 out.push('%');
@@ -291,8 +293,7 @@ fn now_unix_millis() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
@@ -307,6 +308,7 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

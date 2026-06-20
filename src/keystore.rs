@@ -196,6 +196,7 @@ impl std::fmt::Debug for Keystore {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::auth::signing_message;

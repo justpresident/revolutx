@@ -29,11 +29,11 @@ use zeroize::Zeroizing;
 use crate::error::{Error, Result};
 
 /// Header carrying the API key.
-pub(crate) const API_KEY_HEADER: &str = "X-Revx-API-Key";
+pub const API_KEY_HEADER: &str = "X-Revx-API-Key";
 /// Header carrying the request timestamp (Unix epoch milliseconds).
-pub(crate) const TIMESTAMP_HEADER: &str = "X-Revx-Timestamp";
+pub const TIMESTAMP_HEADER: &str = "X-Revx-Timestamp";
 /// Header carrying the base64-encoded Ed25519 signature.
-pub(crate) const SIGNATURE_HEADER: &str = "X-Revx-Signature";
+pub const SIGNATURE_HEADER: &str = "X-Revx-Signature";
 
 /// The authentication material for a single request.
 pub struct RequestAuth {
@@ -114,7 +114,7 @@ impl fmt::Debug for Ed25519Signer {
 /// `query` must be the wire query string without a leading `?` (empty if
 /// absent); `body` must be the exact minified JSON bytes sent (empty if
 /// absent).
-pub(crate) fn signing_message(
+pub fn signing_message(
     timestamp_millis: i64,
     method: &str,
     path: &str,
@@ -133,6 +133,7 @@ pub(crate) fn signing_message(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
