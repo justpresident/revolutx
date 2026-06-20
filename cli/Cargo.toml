@@ -15,10 +15,10 @@ name = "revolutx"
 path = "src/main.rs"
 
 [dependencies]
-revolutx = { path = "..", version = "0.1", features = ["rest", "keystore"] }
+revolutx = { path = "..", version = "0.1", features = ["rest", "keystore", "agent"] }
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
 serde = "1"
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "net", "time"] }
+tokio = { version = "1", features = ["rt", "net", "time", "signal", "macros"] }
 zeroize = "1"

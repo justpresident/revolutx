@@ -24,6 +24,7 @@
     clippy::missing_panics_doc
 )]
 
+mod agent;
 mod args;
 mod commands;
 mod creds;
@@ -57,29 +58,34 @@ fn main() -> ExitCode {
         }
     }
 
-    // Vault management is synchronous and needs no client/runtime.
-    if let Command::Vault { command } = &command {
-        return finish(creds::run_vault(&global, command));
-    }
+    match command {
+        // Vault management is synchronous and needs no client/runtime.
+        Command::Vault { command } => finish(creds::run_vault(&global, &command)),
+        // The agent daemon owns its own runtime + watchdog (the watchdog thread
+        // must be spawned after the fork above, before any runtime).
+        Command::Agent { command } => finish(agent::run(&global, command)),
+        // Every other command is a one-shot over a `RevolutXClient`.
+        command => {
+            // Resolve credentials (may prompt) before entering the async runtime.
+            let client = match creds::client(&global, command.needs_secrets()) {
+                Ok(client) => client,
+                Err(e) => return fail(e.as_ref()),
+            };
 
-    // Resolve credentials (may prompt) before entering the async runtime.
-    let client = match creds::client(&global, command.needs_secrets()) {
-        Ok(client) => client,
-        Err(e) => return fail(e.as_ref()),
-    };
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    eprintln!("error: could not start the async runtime: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
 
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            eprintln!("error: could not start the async runtime: {e}");
-            return ExitCode::FAILURE;
+            finish(runtime.block_on(commands::run(&global, command, &client)))
         }
-    };
-
-    finish(runtime.block_on(commands::run(&global, command, &client)))
+    }
 }
 
 fn finish(result: Result<(), Box<dyn std::error::Error>>) -> ExitCode {

@@ -81,6 +81,16 @@ pub enum Error {
     #[error("{0}")]
     Api(#[from] ApiError),
 
+    /// Communication with the signing agent failed: the socket could not be
+    /// reached, a frame could not be encoded/decoded, or the agent itself
+    /// reported an execution error.
+    #[cfg(feature = "agent")]
+    #[error("agent error: {message}")]
+    Agent {
+        /// Description of the agent communication or execution failure.
+        message: String,
+    },
+
     /// The server returned a status or body the SDK could not classify as a
     /// normal API error.
     #[error("unexpected response: HTTP {status}: {body}")]
@@ -103,6 +113,13 @@ impl Error {
     #[cfg(feature = "rest")]
     pub(crate) fn key(message: impl Into<String>) -> Self {
         Self::Key {
+            message: message.into(),
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    pub(crate) fn agent(message: impl Into<String>) -> Self {
+        Self::Agent {
             message: message.into(),
         }
     }

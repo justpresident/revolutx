@@ -70,6 +70,12 @@ pub enum Command {
         #[command(subcommand)]
         command: TradeCmd,
     },
+    /// Run or query the signing agent (a daemon that unlocks the vault once and
+    /// signs/sends on behalf of headless clients).
+    Agent {
+        #[command(subcommand)]
+        command: AgentCmd,
+    },
 }
 
 impl Command {
@@ -80,9 +86,33 @@ impl Command {
                 command,
                 MarketCmd::PublicOrderBook { .. } | MarketCmd::LastTrades
             ),
+            // `agent start` unlocks the vault (needs hardening); `agent ping` is
+            // a thin client that only talks to an existing daemon.
+            Self::Agent { command } => matches!(command, AgentCmd::Start { .. }),
             _ => true,
         }
     }
+}
+
+#[derive(Subcommand)]
+pub enum AgentCmd {
+    /// Unlock the vault and serve signing requests over a unix socket until
+    /// stopped (Ctrl-C). Runs in the foreground.
+    Start {
+        /// Unix socket path (default: $`XDG_RUNTIME_DIR/revolutx-agent.sock`).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Auto-lock (exit) after this many seconds with no requests. 0 disables
+        /// the idle timeout.
+        #[arg(long, default_value_t = 0)]
+        idle_timeout: u64,
+    },
+    /// Check that an agent is responding on the socket.
+    Ping {
+        /// Unix socket path (default: $`XDG_RUNTIME_DIR/revolutx-agent.sock`).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]

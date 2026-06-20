@@ -73,6 +73,8 @@ jobs:
         run: cargo clippy -p revolutx --no-default-features -- -D warnings
       - name: fix only
         run: cargo clippy -p revolutx --no-default-features --features fix -- -D warnings
+      - name: agent only
+        run: cargo clippy -p revolutx --no-default-features --features agent --all-targets -- -D warnings
       - name: all features
         run: cargo clippy -p revolutx --all-features -- -D warnings
 

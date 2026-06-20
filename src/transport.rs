@@ -70,6 +70,25 @@ impl RequestSpec {
         }
     }
 
+    /// Reassembles a spec from its raw parts. Used by the signing agent to
+    /// reconstruct a request forwarded over the wire.
+    #[cfg(feature = "agent")]
+    pub(crate) const fn from_parts(
+        method: Method,
+        path: String,
+        query: Vec<(String, String)>,
+        body: Option<Vec<u8>>,
+        requires_auth: bool,
+    ) -> Self {
+        Self {
+            method,
+            path,
+            query,
+            body,
+            requires_auth,
+        }
+    }
+
     fn with_json_body<T: Serialize>(mut self, body: &T) -> Result<Self> {
         // `serde_json::to_vec` produces minified JSON: these exact bytes are
         // both signed and transmitted.

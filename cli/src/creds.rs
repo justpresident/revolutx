@@ -12,7 +12,7 @@ use crate::args::{EnvArg, GlobalOpts, VaultCmd};
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
-const fn environment(global: &GlobalOpts) -> Environment {
+pub const fn environment(global: &GlobalOpts) -> Environment {
     match global.env {
         EnvArg::Production => Environment::Production,
         EnvArg::Dev => Environment::Dev,

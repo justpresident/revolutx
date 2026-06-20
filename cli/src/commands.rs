@@ -15,10 +15,12 @@ use crate::output;
 
 type Res = Result<(), Box<dyn std::error::Error>>;
 
-/// Dispatches a (non-`vault`) command. Vault management is handled in `main`.
+/// Dispatches a one-shot command. `vault` and `agent` are handled in `main`.
 pub async fn run(global: &GlobalOpts, command: Command, client: &RevolutXClient) -> Res {
     match command {
-        Command::Vault { .. } => unreachable!("vault is handled before the runtime"),
+        Command::Vault { .. } | Command::Agent { .. } => {
+            unreachable!("vault and agent are handled before the runtime")
+        }
         Command::Balances => balances(global, client).await,
         Command::Config { command } => config(global, client, command).await,
         Command::Market { command } => market(global, client, command).await,

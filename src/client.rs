@@ -74,6 +74,16 @@ impl RevolutXClient {
         Self { executor }
     }
 
+    /// The shared executor backing this client.
+    ///
+    /// Primarily for the signing agent: the daemon builds a normal client (with
+    /// its keystore signer) and forwards incoming requests to this executor, so
+    /// all signing and HTTP stay in the agent process.
+    #[must_use]
+    pub fn executor(&self) -> Arc<dyn RequestExecutor> {
+        Arc::clone(&self.executor)
+    }
+
     /// Returns the configured base URL.
     pub fn base_url(&self) -> &str {
         self.executor.base_url()

@@ -103,6 +103,11 @@ mod auth;
 #[cfg(feature = "rest")]
 pub mod transport;
 
+#[cfg(feature = "agent")]
+pub mod agent;
+
+#[cfg(feature = "agent")]
+pub use agent::{AgentExecutor, default_socket_path, serve};
 #[cfg(feature = "rest")]
 pub use auth::{Ed25519Signer, RequestAuth, Signer};
 #[cfg(feature = "rest")]
