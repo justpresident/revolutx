@@ -39,7 +39,7 @@ impl Server {
     pub fn from_env() -> Result<Self, String> {
         let trading_enabled = env_flag("REVOLUTX_MCP_ENABLE_TRADING");
         // Credential/environment loading is shared across the interface crates.
-        let client = revolutx_common::client_from_env().map_err(|e| e.to_string())?;
+        let client = revolutx::client_from_env().map_err(|e| e.to_string())?;
         Ok(Self {
             client,
             trading_enabled,

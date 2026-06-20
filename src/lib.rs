@@ -65,6 +65,8 @@
 pub mod api;
 #[cfg(feature = "rest")]
 pub mod client;
+#[cfg(feature = "rest")]
+pub mod config;
 pub mod error;
 pub mod model;
 
@@ -82,6 +84,8 @@ mod transport;
 
 #[cfg(feature = "rest")]
 pub use client::{ClientBuilder, Environment, RevolutXClient};
+#[cfg(feature = "rest")]
+pub use config::{ClientConfig, ConfigError, client_from_env};
 pub use error::{ApiError, ApiErrorKind, Error, Result};
 pub use model::Page;
 pub use model::common::{ClientOrderId, OrderId, Price, Quantity, Side, Symbol, Timestamp};

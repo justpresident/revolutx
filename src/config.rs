@@ -1,10 +1,12 @@
-//! Credential and environment configuration shared by the interface crates.
+//! Build a [`RevolutXClient`] from credentials and a target environment, with a
+//! fallback to the `REVOLUTX_*` environment variables.
 //!
-//! All values come from explicit fields (e.g. CLI flags) with a fallback to the
-//! `REVOLUTX_*` environment variables. Building with no credentials yields a
-//! public-only client (only the unauthenticated market-data endpoints work).
+//! All values come from explicit fields (e.g. CLI flags) first, falling back to
+//! the environment. Building with no credentials yields a public-only client
+//! (only the unauthenticated market-data endpoints work). This is the loader
+//! shared by the interface crates (MCP, CLI) and the examples.
 
-use revolutx::{Environment, RevolutXClient};
+use crate::{Environment, RevolutXClient};
 
 const ENV_API_KEY: &str = "REVOLUTX_API_KEY";
 const ENV_PRIVATE_KEY_PEM: &str = "REVOLUTX_PRIVATE_KEY_PEM";
@@ -33,7 +35,7 @@ pub enum ConfigError {
     MissingApiKey,
     /// The underlying client builder rejected the configuration.
     #[error(transparent)]
-    Client(#[from] revolutx::Error),
+    Client(#[from] crate::Error),
 }
 
 /// Resolved configuration for building a [`RevolutXClient`].

@@ -15,6 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Serialize` for the response wrapper types `OrderBook`, `Tickers`,
   `LastTrades`, and `Page<T>` (they were `Deserialize`-only in 0.1.0), so every
   response model now round-trips through serde.
+- `config` module (`ClientConfig`, `client_from_env`) for building a client from
+  CLI flags / `REVOLUTX_*` environment variables, under the `rest` feature.
 
 ## [0.1.0] - 2026-06-19
 
