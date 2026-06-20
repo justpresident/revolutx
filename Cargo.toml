@@ -32,7 +32,7 @@ rest = ["dep:reqwest", "dep:ed25519-dalek", "dep:base64", "dep:zeroize"]
 # feature/module layout is in place. See the `fix` backlog task.
 fix = []
 # Encrypted credential vault (rcypher) exposed as a `Signer`. Implies `rest`.
-keystore = ["rest", "dep:rcypher", "zeroize/derive"]
+keystore = ["rest", "dep:rcypher", "dep:bincode", "zeroize/derive"]
 
 [dependencies]
 # Shared, always-on: domain models, error types, (de)serialization.
@@ -48,6 +48,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "p
 base64 = { version = "0.22", optional = true }
 zeroize = { version = "1", optional = true }
 rcypher = { version = "0.2", default-features = false, optional = true }
+bincode = { version = "2", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

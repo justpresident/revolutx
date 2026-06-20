@@ -23,8 +23,8 @@
 
 use std::path::Path;
 
+use bincode::{Decode, Encode};
 use rcypher::{Cypher, CypherVersion, EncryptionKey, save_encrypted};
-use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::auth::{Ed25519Signer, RequestAuth, Signer};
@@ -34,8 +34,9 @@ pub use rcypher::{
     Argon2Params, disable_core_dumps, enable_ptrace_protection, is_debugger_attached,
 };
 
-/// The secrets stored in the vault. Zeroized on drop.
-#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+/// The secrets stored in the vault. Serialized with bincode (compact binary,
+/// no text-escaping of the PEM) and zeroized on drop.
+#[derive(Encode, Decode, Zeroize, ZeroizeOnDrop)]
 struct VaultContents {
     api_key: String,
     private_key_pem: String,
@@ -126,7 +127,8 @@ impl Keystore {
             private_key_pem: private_key_pem.to_owned(),
         };
         let plaintext = Zeroizing::new(
-            serde_json::to_vec(&contents).map_err(|e| KeystoreError::Contents(e.to_string()))?,
+            bincode::encode_to_vec(&contents, bincode::config::standard())
+                .map_err(|e| KeystoreError::Contents(e.to_string()))?,
         );
         let key = EncryptionKey::from_password_with_params(
             CypherVersion::default(),
@@ -176,10 +178,12 @@ impl Signer for Keystore {
             .map_err(|e| Error::Signing {
                 message: format!("vault decrypt failed: {e}"),
             })?;
-        let contents: VaultContents =
-            serde_json::from_slice(plaintext.as_slice()).map_err(|e| Error::Signing {
-                message: format!("vault contents invalid: {e}"),
-            })?;
+        let (contents, _): (VaultContents, usize) =
+            bincode::decode_from_slice(plaintext.as_slice(), bincode::config::standard()).map_err(
+                |e| Error::Signing {
+                    message: format!("vault contents invalid: {e}"),
+                },
+            )?;
         let signer = Ed25519Signer::from_pem(contents.api_key.as_str(), &contents.private_key_pem)?;
         signer.authenticate(message)
     }
