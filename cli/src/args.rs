@@ -22,7 +22,7 @@ pub struct GlobalOpts {
     /// Target environment.
     #[arg(long, global = true, value_enum, default_value_t = EnvArg::Production)]
     pub env: EnvArg,
-    /// Path to the encrypted vault (default: $`XDG_CONFIG_HOME/revolutx/vault`).
+    /// Path to the encrypted vault (default: `~/.revolutx/vault`).
     #[arg(long, global = true)]
     pub vault: Option<PathBuf>,
     /// Use plaintext credentials from the REVOLUTX_* environment variables
@@ -114,19 +114,16 @@ pub enum AgentCmd {
 
 #[derive(Subcommand)]
 pub enum VaultCmd {
-    /// Create a new encrypted vault. Supply a key with exactly one of
-    /// `--key-file` (import) or `--generate` (create a fresh key pair).
-    #[command(group(clap::ArgGroup::new("key_source").required(true).args(["key_file", "generate"])))]
+    /// Initialize the encrypted vault (one-time setup).
+    ///
+    /// Prompts for a master password, generates an Ed25519 key pair (the private
+    /// key is stored only in the vault), prints the public key with instructions
+    /// to create your Revolut X API key, then stores that API key in the vault.
     Init {
-        /// Import an existing Ed25519 private key PEM (e.g. from
-        /// `openssl genpkey -algorithm ed25519 -out private.pem`).
+        /// Import an existing Ed25519 private key PEM instead of generating one
+        /// (e.g. from `openssl genpkey -algorithm ed25519 -out private.pem`).
         #[arg(long)]
         key_file: Option<PathBuf>,
-        /// Generate a fresh Ed25519 key pair; the private key goes straight into
-        /// the vault (never to disk) and the public key is printed to register
-        /// with Revolut X.
-        #[arg(long)]
-        generate: bool,
     },
 }
 

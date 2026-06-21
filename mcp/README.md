@@ -37,7 +37,7 @@ Create an encrypted vault once, and start the agent (it prompts for the master
 password); the MCP then connects to it:
 
 ```sh
-revolutx vault init --key-file private.pem   # one-time, prompts for API key + password
+revolutx vault init                          # one-time: generates a key, guides you to create the API key
 revolutx agent start                         # read-only
 # ...or, to permit order placement/cancellation through the MCP:
 revolutx agent start --enable-trading        # REAL TRADING

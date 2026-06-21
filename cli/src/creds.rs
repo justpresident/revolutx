@@ -2,11 +2,11 @@
 //! for the master password) or, with `--insecure-env`, from environment
 //! variables. Also implements `vault init`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use revolutx::{ClientConfig, Environment, Keystore, KeystoreOptions, RevolutXClient};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::args::{EnvArg, GlobalOpts, VaultCmd};
 
@@ -19,17 +19,15 @@ const fn environment(global: &GlobalOpts) -> Environment {
     }
 }
 
-/// The vault path: `--vault`, else `$XDG_CONFIG_HOME/revolutx/vault`, else
-/// `$HOME/.config/revolutx/vault`.
+/// The vault path: `--vault`, else `~/.revolutx/vault`.
 pub fn vault_path(global: &GlobalOpts) -> PathBuf {
     if let Some(path) = &global.vault {
         return path.clone();
     }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("revolutx").join("vault")
+    std::env::var_os("HOME")
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+        .join(".revolutx")
+        .join("vault")
 }
 
 fn keystore_options(global: &GlobalOpts) -> KeystoreOptions {
@@ -60,16 +58,15 @@ pub fn client(global: &GlobalOpts, needs_auth: bool) -> Res<RevolutXClient> {
     let path = vault_path(global);
     if !path.exists() {
         return Err(format!(
-            "no vault at {} — run `revolutx vault init --key-file <pem>` first, or use --insecure-env",
+            "no vault at {} — run `revolutx vault init` first, or use --insecure-env",
             path.display()
         )
         .into());
     }
 
-    let mut password = rpassword::prompt_password("Master password: ")?;
-    let keystore = Keystore::open_with(&path, &password, &keystore_options(global));
-    password.zeroize();
-    let keystore = keystore?;
+    // Read the master password (wiped on drop) and unlock the vault.
+    let password = Zeroizing::new(rpassword::prompt_password("Master password: ")?);
+    let keystore = Keystore::open_with(&path, &password, &keystore_options(global))?;
 
     Ok(RevolutXClient::builder()
         .environment(env)
@@ -79,59 +76,81 @@ pub fn client(global: &GlobalOpts, needs_auth: bool) -> Res<RevolutXClient> {
 
 /// Runs a `vault` subcommand (synchronous — no network).
 pub fn run_vault(global: &GlobalOpts, command: &VaultCmd) -> Res<()> {
-    match command {
-        VaultCmd::Init { key_file, generate } => {
-            let path = vault_path(global);
-            if path.exists() {
-                return Err(format!("a vault already exists at {}", path.display()).into());
-            }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+    let VaultCmd::Init { key_file } = command;
+    init_vault(global, key_file.as_deref())
+}
 
-            // The private key (zeroized on drop) comes either from a generated
-            // key pair or an imported PEM. clap guarantees exactly one source.
-            let (pem, generated_public_pem): (Zeroizing<String>, Option<String>) = if *generate {
-                let pair = revolutx::generate_key_pair()?;
-                (pair.private_pem, Some(pair.public_pem))
-            } else if let Some(key_file) = key_file {
-                (Zeroizing::new(std::fs::read_to_string(key_file)?), None)
-            } else {
-                return Err("provide --key-file <pem> or --generate".into());
-            };
-
-            // The API key is a secret: read it via a hidden prompt (never a flag,
-            // which would leak it into argv / shell history).
-            let mut api_key = rpassword::prompt_password("API key: ")?;
-            let mut password = rpassword::prompt_password("New master password: ")?;
-            let mut confirm = rpassword::prompt_password("Confirm master password: ")?;
-            if password != confirm {
-                password.zeroize();
-                confirm.zeroize();
-                api_key.zeroize();
-                return Err("passwords do not match".into());
-            }
-
-            let result = Keystore::create_with(
-                &path,
-                &password,
-                &api_key,
-                pem.as_str(),
-                &keystore_options(global),
-            );
-            password.zeroize();
-            confirm.zeroize();
-            api_key.zeroize();
-            result?;
-
-            println!("Vault created at {}", path.display());
-            if let Some(public_pem) = generated_public_pem {
-                println!(
-                    "\nGenerated a new Ed25519 key pair. Register this public key with Revolut X:\n"
-                );
-                print!("{public_pem}");
-            }
-            Ok(())
-        }
+/// One-time vault setup: master password → key pair (generated, or imported with
+/// `--key-file`) → API key → encrypted vault. Every secret is `Zeroizing`, so it
+/// is wiped on any exit, including the early returns below.
+fn init_vault(global: &GlobalOpts, key_file: Option<&Path>) -> Res<()> {
+    let path = vault_path(global);
+    if path.exists() {
+        return Err(format!("a vault already exists at {}", path.display()).into());
     }
+    create_private_dir(path.parent())?;
+
+    // 1. Set the master password (with confirmation) first.
+    let password = Zeroizing::new(rpassword::prompt_password("New master password: ")?);
+    let confirm = Zeroizing::new(rpassword::prompt_password("Confirm master password: ")?);
+    if password.as_str() != confirm.as_str() {
+        return Err("passwords do not match".into());
+    }
+    drop(confirm);
+
+    // 2. Key material: generate a fresh pair (default) or import an existing PEM.
+    let pem: Zeroizing<String> = if let Some(key_file) = key_file {
+        Zeroizing::new(std::fs::read_to_string(key_file)?)
+    } else {
+        let pair = revolutx::generate_key_pair()?;
+        print_onboarding(&pair.public_pem);
+        pair.private_pem
+    };
+
+    // 3. The API key — created on the website using the public key above, then
+    //    pasted here (hidden input, like a password).
+    let api_key = Zeroizing::new(rpassword::prompt_password("Paste your API key: ")?);
+
+    // 4. Encrypt everything into the vault.
+    Keystore::create_with(&path, &password, &api_key, &pem, &keystore_options(global))?;
+
+    println!(
+        "\nVault created at {}. Initialization complete.",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Prints the onboarding instructions shown after generating a key pair.
+fn print_onboarding(public_pem: &str) {
+    println!();
+    println!("Generated a new Ed25519 key pair — the private key is stored only in your vault.");
+    println!("To finish, create your Revolut X API key:");
+    println!("  1. Log in to https://exchange.revolut.com");
+    println!("  2. In your profile, create a new API key and paste in this PUBLIC key:");
+    println!();
+    print!("{public_pem}");
+    println!();
+    println!("Then paste the API key it gives you below.");
+}
+
+/// Creates the vault's parent directory privately (`0700` on unix).
+#[cfg(unix)]
+fn create_private_dir(dir: Option<&Path>) -> Res<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: Option<&Path>) -> Res<()> {
+    if let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(())
 }

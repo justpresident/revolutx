@@ -8,22 +8,30 @@ installed binary is named `revolutx`.
 cargo install revolutx-cli
 ```
 
-## Credentials
+## Setup
 
-By default, authenticated commands read credentials from an **encrypted vault**
-(rcypher: Argon2id + AES-256-CBC + HMAC), unlocked with a master password. Create
-one by generating a fresh key pair, or by importing an existing Ed25519 PEM:
+Authenticated commands read credentials from an **encrypted vault** (rcypher:
+Argon2id + AES-256-CBC + HMAC) at `~/.revolutx/vault`, unlocked with a master
+password. Initialize it once:
 
 ```sh
-revolutx vault init --generate                  # new key pair; prints the public key to register
-revolutx vault init --key-file private.pem      # import an existing key
+revolutx vault init
 ```
 
-With `--generate`, the private key goes straight into the vault — it never
-touches the disk unencrypted — and the public key is printed for you to register
-with Revolut X. Both forms prompt for the API key and a master password.
+This:
 
-Then run commands — you'll be prompted for the master password when needed:
+1. prompts for a master password,
+2. generates an Ed25519 key pair (the private key is stored **only** in the
+   vault — it never touches the disk unencrypted),
+3. prints the public key with instructions to create your API key at
+   <https://exchange.revolut.com>, and
+4. stores the API key you paste back in.
+
+Already have a key pair? `revolutx vault init --key-file private.pem` imports it
+instead of generating one.
+
+Then run commands — you'll be prompted only for the master password to unlock the
+vault:
 
 ```sh
 revolutx balances
