@@ -118,6 +118,8 @@ pub use error::{ApiError, ApiErrorKind, Error, Result};
 #[cfg(feature = "keystore")]
 pub use keystore::{GeneratedKeyPair, Keystore, KeystoreError, KeystoreOptions, generate_key_pair};
 pub use model::Page;
+#[cfg(feature = "rest")]
+pub use model::RawPage;
 pub use model::common::{ClientOrderId, OrderId, Price, Quantity, Side, Symbol, Timestamp};
 pub use rust_decimal::Decimal;
 #[cfg(feature = "rest")]

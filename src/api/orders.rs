@@ -17,7 +17,7 @@ use crate::model::orders::{
     OrderType,
 };
 use crate::model::trades::Fill;
-use crate::model::{Data, OneOrMany, Page};
+use crate::model::{Data, OneOrMany, Page, RawPage};
 use crate::transport::{RequestSpec, encode_component};
 
 /// Filters for `GET /orders/active`.
@@ -248,16 +248,20 @@ impl<'a> OrdersApi<'a> {
 
     /// `GET /orders/active` — a page of currently active orders.
     pub async fn active(&self, query: &ActiveOrdersQuery) -> Result<Page<Order>> {
-        self.client
+        let raw: RawPage<Order> = self
+            .client
             .send_json(RequestSpec::get("/orders/active").with_query(query.to_query()))
-            .await
+            .await?;
+        Ok(raw.into())
     }
 
     /// `GET /orders/historical` — a page of historical orders.
     pub async fn historical(&self, query: &HistoricalOrdersQuery) -> Result<Page<Order>> {
-        self.client
+        let raw: RawPage<Order> = self
+            .client
             .send_json(RequestSpec::get("/orders/historical").with_query(query.to_query()))
-            .await
+            .await?;
+        Ok(raw.into())
     }
 
     /// `DELETE /orders/{id}` — cancels a single order.

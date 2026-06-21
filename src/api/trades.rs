@@ -2,9 +2,9 @@
 
 use crate::client::RevolutXClient;
 use crate::error::Result;
-use crate::model::Page;
 use crate::model::market_data::Trade;
 use crate::model::trades::Fill;
+use crate::model::{Page, RawPage};
 use crate::transport::{RequestSpec, encode_component};
 
 /// Optional filters for the trade-history endpoints. Timestamps are Unix epoch
@@ -53,17 +53,21 @@ impl<'a> TradesApi<'a> {
     /// `GET /trades/all/{symbol}` — public market trades for a symbol.
     pub async fn all(&self, symbol: &str, query: &TradesQuery) -> Result<Page<Trade>> {
         let path = format!("/trades/all/{}", encode_component(symbol));
-        self.client
+        let raw: RawPage<Trade> = self
+            .client
             .send_json(RequestSpec::get(path).with_query(query.to_query()))
-            .await
+            .await?;
+        Ok(raw.into())
     }
 
     /// `GET /trades/private/{symbol}` — the account's own executions for a
     /// symbol.
     pub async fn private(&self, symbol: &str, query: &TradesQuery) -> Result<Page<Fill>> {
         let path = format!("/trades/private/{}", encode_component(symbol));
-        self.client
+        let raw: RawPage<Fill> = self
+            .client
             .send_json(RequestSpec::get(path).with_query(query.to_query()))
-            .await
+            .await?;
+        Ok(raw.into())
     }
 }

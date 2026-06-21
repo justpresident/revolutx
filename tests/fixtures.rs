@@ -11,12 +11,12 @@
 
 use std::collections::HashMap;
 
-use revolutx::Page;
 use revolutx::model::balances::Balance;
 use revolutx::model::configuration::{Currency, CurrencyPair};
 use revolutx::model::market_data::{Candle, LastTrades, OrderBook, Tickers, Trade};
 use revolutx::model::orders::{Order, OrderAck, OrderPlacementRequest, OrderReplacementRequest};
 use revolutx::model::trades::Fill;
+use revolutx::{Page, RawPage};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -162,7 +162,8 @@ fn paginated_order_examples_deserialize() {
         "ActiveConditionalOrdersPaginatedResponseExample",
         "HistoricalOrdersPaginatedResponseExample",
     ] {
-        let page: Page<Order> = de(&example(&spec, name), name);
+        // The wire envelope parses into RawPage, then converts to the flat Page.
+        let page: Page<Order> = de::<RawPage<Order>>(&example(&spec, name), name).into();
         assert_eq!(page.items.len(), 1, "{name}");
     }
 }
@@ -170,16 +171,18 @@ fn paginated_order_examples_deserialize() {
 #[test]
 fn paginated_trade_examples_deserialize() {
     let spec = spec();
-    let trades: Page<Trade> = de(
+    let trades: Page<Trade> = de::<RawPage<Trade>>(
         &example(&spec, "TradesPaginatedResponseExample"),
         "TradesPaginatedResponseExample",
-    );
+    )
+    .into();
     assert_eq!(trades.items.len(), 1);
 
-    let client_trades: Page<Fill> = de(
+    let client_trades: Page<Fill> = de::<RawPage<Fill>>(
         &example(&spec, "ClientTradesPaginatedResponseExample"),
         "ClientTradesPaginatedResponseExample",
-    );
+    )
+    .into();
     assert_eq!(client_trades.items.len(), 1);
 }
 
