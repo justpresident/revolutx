@@ -39,7 +39,8 @@ master password. Run a **signing agent**: it unlocks the vault once, then signs
 and performs every request on behalf of the client connected to its unix socket.
 
 ```sh
-revolutx agent start                       # prompts once, then serves
+revolutx agent start                       # prompts once, then serves (read-only)
+revolutx agent start --enable-trading      # also permit order placement/cancellation (REAL TRADING)
 revolutx agent start --idle-timeout 600    # exit if no client connects in 10 min
 revolutx agent start --idle-timeout 0      # never auto-lock before connecting
 ```
@@ -51,6 +52,9 @@ agent. Protections:
 - **Single client.** The agent accepts exactly one connection and refuses the
   rest. When that client disconnects, the daemon exits and the vault is
   re-locked — reconnects are not allowed.
+- **Trading off by default.** The agent refuses every order-mutating request
+  unless started with `--enable-trading`. This is the authoritative gate — a
+  connected client (e.g. the MCP) cannot turn trading on.
 - **Pre-connection idle timeout** (default 5 minutes). If no client connects in
   time, the agent auto-locks and exits. Once a client *is* connected it is never
   timed out for being idle.

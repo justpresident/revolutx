@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use revolutx::agent::AgentExecutor;
-use revolutx::{Environment, RevolutXClient};
+use revolutx::RevolutXClient;
+use revolutx::agent::{AgentExecutor, default_socket_path};
 use serde_json::{Value, json};
 
 use crate::protocol::{
@@ -31,40 +31,35 @@ impl Server {
         }
     }
 
-    /// Builds the server from environment variables:
+    /// Connects the server to a running `revolutx agent`.
     ///
-    /// - `REVOLUTX_AGENT_SOCKET` — path to a running `revolutx agent`'s unix
-    ///   socket. **The secure path:** the agent holds the keystore and does all
-    ///   signing + HTTP, so the MCP keeps no key material of its own. When set,
-    ///   the credential variables below are ignored.
-    /// - `REVOLUTX_API_KEY` + (`REVOLUTX_PRIVATE_KEY_PEM` or
-    ///   `REVOLUTX_PRIVATE_KEY_PATH`) — **plaintext credentials, a dev fallback**
-    ///   used only when `REVOLUTX_AGENT_SOCKET` is unset (optional; without them
-    ///   only the public tools work).
-    /// - `REVOLUTX_ENVIRONMENT` — `production` (default) or `dev`.
-    /// - `REVOLUTX_MCP_ENABLE_TRADING` — set to a truthy value to expose the
-    ///   order-mutating tools.
+    /// The agent holds the keystore and does **all** signing and HTTP, so the MCP
+    /// keeps no key material and needs no process hardening of its own. The agent
+    /// also owns the environment (base URL) and the trading policy; the MCP reads
+    /// both from the connection handshake. Configuration is a single, optional,
+    /// non-sensitive variable:
+    ///
+    /// - `REVOLUTX_AGENT_SOCKET` — the agent's unix socket path (default
+    ///   `$XDG_RUNTIME_DIR/revolutx-agent.sock`).
+    ///
+    /// Whether order-mutating tools are exposed is decided by the agent
+    /// (`revolutx agent start --enable-trading`), not by the MCP.
     pub async fn from_env() -> Result<Self, String> {
-        let trading_enabled = env_flag("REVOLUTX_MCP_ENABLE_TRADING");
-        let client = Self::build_client().await?;
+        let socket =
+            env_nonempty("REVOLUTX_AGENT_SOCKET").map_or_else(default_socket_path, Into::into);
+        let executor = AgentExecutor::connect(&socket).await.map_err(|e| {
+            format!(
+                "could not connect to the agent at {}: {e}",
+                socket.display()
+            )
+        })?;
+        // The trading policy is the agent's, surfaced via the handshake.
+        let trading_enabled = executor.trading_enabled();
+        let client = RevolutXClient::with_executor(Arc::new(executor));
         Ok(Self {
             client,
             trading_enabled,
         })
-    }
-
-    async fn build_client() -> Result<RevolutXClient, String> {
-        if let Some(socket) = env_nonempty("REVOLUTX_AGENT_SOCKET") {
-            // Secure path: delegate all signing + HTTP to the agent. The MCP
-            // holds no secrets, so it needs no process hardening of its own.
-            let executor = AgentExecutor::connect(&socket, environment_from_env().base_url())
-                .await
-                .map_err(|e| format!("could not connect to the agent at {socket}: {e}"))?;
-            Ok(RevolutXClient::with_executor(Arc::new(executor)))
-        } else {
-            // Explicit dev fallback: plaintext credentials from REVOLUTX_*.
-            revolutx::client_from_env().map_err(|e| e.to_string())
-        }
     }
 
     pub fn is_authenticated(&self) -> bool {
@@ -124,7 +119,7 @@ impl Server {
             "protocolVersion": protocol_version,
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-            "instructions": "Tools for the Revolut X crypto exchange. Read-only market data and account tools are always available; order placement and cancellation require the server to be started with REVOLUTX_MCP_ENABLE_TRADING=1."
+            "instructions": "Tools for the Revolut X crypto exchange. Read-only market data and account tools are always available; order placement and cancellation are only offered when the connected signing agent was started with trading enabled."
         })
     }
 
@@ -152,29 +147,6 @@ impl Server {
 
 fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
-}
-
-/// The target environment from `REVOLUTX_ENVIRONMENT` (default production). Only
-/// used for the agent executor's reported base URL; the agent owns the real one.
-fn environment_from_env() -> Environment {
-    match env_nonempty("REVOLUTX_ENVIRONMENT").as_deref() {
-        Some(v)
-            if matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "dev" | "development"
-            ) =>
-        {
-            Environment::Dev
-        }
-        _ => Environment::Production,
-    }
-}
-
-fn env_flag(name: &str) -> bool {
-    matches!(
-        env_nonempty(name).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
 }
 
 #[cfg(test)]

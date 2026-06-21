@@ -16,8 +16,12 @@
 //! # Wire protocol
 //!
 //! Each message is a `u32` big-endian length prefix followed by that many bytes
-//! of bincode. Requests are [`AgentRequest`] (`Ping` or `Execute`), responses
-//! are [`AgentResponse`] (`Pong`, `Executed`, or `Failed`).
+//! of bincode. Requests are [`AgentRequest`] (`Ping`, `Capabilities`, or
+//! `Execute`), responses are [`AgentResponse`] (`Pong`, `Capabilities`,
+//! `Executed`, or `Failed`). On connect, a client first asks for
+//! [`Capabilities`] — the agent reports its base URL and whether order mutations
+//! are allowed, and **enforces** that policy on every `Execute` (a non-`GET`
+//! request is refused unless trading is enabled).
 //!
 //! # Transport security
 //!
@@ -53,6 +57,8 @@ const MAX_RESPONSE_FRAME: u32 = 1024 * 1024;
 pub enum AgentRequest {
     /// Liveness check.
     Ping,
+    /// Ask the agent what it allows (target base URL, whether trading is on).
+    Capabilities,
     /// Execute a forwarded request (the agent signs and sends it).
     Execute(WireRequest),
 }
@@ -62,11 +68,27 @@ pub enum AgentRequest {
 pub enum AgentResponse {
     /// Reply to [`AgentRequest::Ping`].
     Pong,
+    /// Reply to [`AgentRequest::Capabilities`].
+    Capabilities(Capabilities),
     /// A completed request's raw response.
     Executed(WireResponse),
-    /// The agent could not execute the request (the message is human-readable
-    /// and intentionally coarse — it must not leak credential material).
+    /// The agent could not execute the request, or refused it (the message is
+    /// human-readable and intentionally coarse — it must not leak credential
+    /// material).
     Failed(String),
+}
+
+/// What an agent is configured to allow. Reported during the connection
+/// handshake so a client (e.g. the MCP) reflects the agent's policy without
+/// owning any of it.
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct Capabilities {
+    /// The base URL the agent targets (it owns the real environment; clients use
+    /// this only for display).
+    pub base_url: String,
+    /// Whether the agent will execute order-mutating (non-`GET`) requests. The
+    /// agent enforces this regardless of what any client believes.
+    pub trading_enabled: bool,
 }
 
 /// The wire form of a [`RequestSpec`]: method as a token, plus the path, query,
@@ -143,28 +165,48 @@ fn decode<T: Decode<()>>(bytes: &[u8]) -> std::io::Result<T> {
 #[derive(Debug)]
 pub struct AgentExecutor {
     base_url: String,
+    trading_enabled: bool,
     conn: tokio::sync::Mutex<UnixStream>,
 }
 
 impl AgentExecutor {
-    /// Connects to the agent at `socket_path`. `base_url` is informational only
-    /// (the agent owns the real base URL); pass the environment's base URL so
-    /// [`crate::RevolutXClient::base_url`] reports something meaningful.
-    pub async fn connect(
-        socket_path: impl AsRef<Path>,
-        base_url: impl Into<String>,
-    ) -> Result<Self> {
+    /// Connects to the agent at `socket_path` and performs the capabilities
+    /// handshake. The agent reports its own base URL and trading policy, so the
+    /// client needs no environment configuration of its own.
+    pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self> {
         let socket_path = socket_path.as_ref();
-        let stream = UnixStream::connect(socket_path).await.map_err(|e| {
+        let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
             Error::agent(format!(
                 "cannot connect to agent at {}: {e}",
                 socket_path.display()
             ))
         })?;
+
+        // Handshake: learn the agent's base URL and trading policy up front.
+        write_frame(&mut stream, &AgentRequest::Capabilities)
+            .await
+            .map_err(|e| Error::agent(format!("capabilities handshake failed: {e}")))?;
+        let bytes = read_frame_bytes(&mut stream, MAX_RESPONSE_FRAME)
+            .await
+            .map_err(|e| Error::agent(format!("capabilities handshake failed: {e}")))?;
+        let AgentResponse::Capabilities(caps) = decode::<AgentResponse>(&bytes)
+            .map_err(|e| Error::agent(format!("invalid capabilities response: {e}")))?
+        else {
+            return Err(Error::agent("agent did not answer with capabilities"));
+        };
+
         Ok(Self {
-            base_url: base_url.into(),
+            base_url: caps.base_url,
+            trading_enabled: caps.trading_enabled,
             conn: tokio::sync::Mutex::new(stream),
         })
+    }
+
+    /// Whether the agent will execute order-mutating requests. Determined by the
+    /// agent at startup and read during the connection handshake.
+    #[must_use]
+    pub const fn trading_enabled(&self) -> bool {
+        self.trading_enabled
     }
 
     /// Checks that the agent is responding (sent over the established
@@ -210,7 +252,9 @@ impl RequestExecutor for AgentExecutor {
                     body: w.body,
                 }),
                 AgentResponse::Failed(message) => Err(Error::agent(message)),
-                AgentResponse::Pong => Err(Error::agent("agent returned Pong to an Execute")),
+                AgentResponse::Pong | AgentResponse::Capabilities(_) => {
+                    Err(Error::agent("unexpected agent response to an Execute"))
+                }
             }
         })
     }
@@ -239,12 +283,17 @@ impl RequestExecutor for AgentExecutor {
 /// re-locking the vault. `on_connect` fires once, when that client connects — the
 /// daemon uses it to cancel its pre-connection idle timeout.
 ///
+/// `trading_enabled` is the authoritative order-mutation policy: when `false`,
+/// the agent refuses every non-`GET` request regardless of what the client
+/// believes. It is reported to the client during the capabilities handshake.
+///
 /// The socket is created with `0600` permissions. If a live agent is already
 /// listening on `socket_path` this returns an error; a stale socket file (no
 /// listener) is removed and replaced.
 pub async fn serve(
     executor: Arc<dyn RequestExecutor>,
     socket_path: &Path,
+    trading_enabled: bool,
     on_connect: impl FnOnce() + Send,
 ) -> Result<()> {
     let listener = bind(socket_path).await?;
@@ -263,7 +312,7 @@ pub async fn serve(
         }
     });
 
-    handle_connection(executor.as_ref(), &mut stream).await;
+    handle_connection(executor.as_ref(), &mut stream, trading_enabled).await;
     rejector.abort();
     Ok(())
 }
@@ -302,7 +351,11 @@ fn set_socket_permissions(_socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(executor: &dyn RequestExecutor, stream: &mut UnixStream) {
+async fn handle_connection(
+    executor: &dyn RequestExecutor,
+    stream: &mut UnixStream,
+    trading_enabled: bool,
+) {
     loop {
         // A closed connection or a malformed frame just ends this session.
         let Ok(bytes) = read_frame_bytes(stream, MAX_REQUEST_FRAME).await else {
@@ -315,7 +368,11 @@ async fn handle_connection(executor: &dyn RequestExecutor, stream: &mut UnixStre
 
         let response = match request {
             AgentRequest::Ping => AgentResponse::Pong,
-            AgentRequest::Execute(wire) => execute_forwarded(executor, wire).await,
+            AgentRequest::Capabilities => AgentResponse::Capabilities(Capabilities {
+                base_url: executor.base_url().to_owned(),
+                trading_enabled,
+            }),
+            AgentRequest::Execute(wire) => execute_forwarded(executor, wire, trading_enabled).await,
         };
 
         if write_frame(stream, &response).await.is_err() {
@@ -324,10 +381,23 @@ async fn handle_connection(executor: &dyn RequestExecutor, stream: &mut UnixStre
     }
 }
 
-async fn execute_forwarded(executor: &dyn RequestExecutor, wire: WireRequest) -> AgentResponse {
+async fn execute_forwarded(
+    executor: &dyn RequestExecutor,
+    wire: WireRequest,
+    trading_enabled: bool,
+) -> AgentResponse {
     let Ok(method) = Method::from_bytes(wire.method.as_bytes()) else {
         return AgentResponse::Failed(format!("invalid HTTP method '{}'", wire.method));
     };
+    // Authoritative gate: any state-changing (non-GET) request is an order
+    // mutation, refused unless the agent was started with trading enabled. The
+    // agent — not the client — is the trust boundary for this.
+    if !trading_enabled && method != Method::GET {
+        return AgentResponse::Failed(
+            "trading is disabled on this agent; restart it with --enable-trading to allow orders"
+                .to_owned(),
+        );
+    }
     let spec =
         RequestSpec::from_parts(method, wire.path, wire.query, wire.body, wire.requires_auth);
     match executor.execute(spec).await {
@@ -382,35 +452,78 @@ mod tests {
         panic!("socket never appeared");
     }
 
+    fn spawn_echo(socket: PathBuf, trading: bool) -> tokio::task::JoinHandle<Result<()>> {
+        tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, trading, || {}).await })
+    }
+
     #[tokio::test]
-    async fn executor_round_trips_through_serve() {
+    async fn round_trips_and_reports_capabilities() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-
-        let server = {
-            let socket = socket.clone();
-            tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, || {}).await })
-        };
+        let server = spawn_echo(socket.clone(), false);
         wait_for(&socket).await;
 
-        // A single persistent connection carries many requests.
-        let executor = AgentExecutor::connect(&socket, "http://stub/api/1.0")
-            .await
-            .unwrap();
-        executor.ping().await.unwrap();
+        // The handshake learns the agent's base URL and trading policy.
+        let executor = AgentExecutor::connect(&socket).await.unwrap();
+        assert_eq!(executor.base_url(), "http://stub/api/1.0");
+        assert!(!executor.trading_enabled());
 
+        executor.ping().await.unwrap();
+        // A single persistent connection carries many requests.
         let raw = executor
             .execute(RequestSpec::get("/balances"))
             .await
             .unwrap();
         assert_eq!(raw.status, 200);
         assert_eq!(raw.body, b"/balances");
-
         let raw = executor
             .execute(RequestSpec::get("/orders/active"))
             .await
             .unwrap();
         assert_eq!(raw.body, b"/orders/active");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_refuses_mutations_when_trading_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let server = spawn_echo(socket.clone(), false);
+        wait_for(&socket).await;
+
+        let executor = AgentExecutor::connect(&socket).await.unwrap();
+        assert!(!executor.trading_enabled());
+
+        // Reads are always allowed.
+        executor
+            .execute(RequestSpec::get("/orders/active"))
+            .await
+            .unwrap();
+        // A non-GET (order mutation) is refused by the agent itself.
+        let err = executor
+            .execute(RequestSpec::delete("/orders/abc"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Agent { .. }));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_allows_mutations_when_trading_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let server = spawn_echo(socket.clone(), true);
+        wait_for(&socket).await;
+
+        let executor = AgentExecutor::connect(&socket).await.unwrap();
+        assert!(executor.trading_enabled());
+        let raw = executor
+            .execute(RequestSpec::delete("/orders/abc"))
+            .await
+            .unwrap();
+        assert_eq!(raw.body, b"/orders/abc");
 
         server.abort();
     }
@@ -431,16 +544,17 @@ mod tests {
         };
         let server = {
             let socket = socket.clone();
-            tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, on_connect).await })
+            tokio::spawn(
+                async move { serve(Arc::new(EchoExecutor), &socket, false, on_connect).await },
+            )
         };
         wait_for(&socket).await;
         assert_eq!(connects.load(Ordering::Relaxed), 0, "not yet connected");
 
-        let executor = AgentExecutor::connect(&socket, "http://stub/api/1.0")
-            .await
-            .unwrap();
+        // connect() does the capabilities handshake, then two pings — still one
+        // accepted connection, so `on_connect` fires exactly once.
+        let executor = AgentExecutor::connect(&socket).await.unwrap();
         executor.ping().await.unwrap();
-        // Two requests over one connection still mean one `on_connect`.
         executor.ping().await.unwrap();
         assert_eq!(connects.load(Ordering::Relaxed), 1);
 
@@ -451,25 +565,16 @@ mod tests {
     async fn refuses_a_second_client_connection() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-
-        let server = {
-            let socket = socket.clone();
-            tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, || {}).await })
-        };
+        let server = spawn_echo(socket.clone(), false);
         wait_for(&socket).await;
 
         // First client owns the connection.
-        let first = AgentExecutor::connect(&socket, "http://stub/api/1.0")
-            .await
-            .unwrap();
+        let first = AgentExecutor::connect(&socket).await.unwrap();
         first.ping().await.unwrap();
 
-        // A second client connects at the socket layer but is immediately closed
-        // by the rejector, so its first request fails.
-        let second = AgentExecutor::connect(&socket, "http://stub/api/1.0")
-            .await
-            .unwrap();
-        assert!(second.ping().await.is_err());
+        // A second client is accepted at the socket layer but closed immediately
+        // by the rejector, so even its handshake fails.
+        assert!(AgentExecutor::connect(&socket).await.is_err());
 
         // The first client is unaffected.
         first.ping().await.unwrap();

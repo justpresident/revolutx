@@ -1,8 +1,9 @@
 //! MCP tool definitions and dispatch onto the `revolutx` SDK.
 //!
 //! Read-only tools are always available. Order-mutating tools
-//! (`place_*`, `cancel_*`) are only listed and callable when trading is
-//! explicitly enabled (`REVOLUTX_MCP_ENABLE_TRADING=1`).
+//! (`place_*`, `cancel_*`) are only listed and callable when the connected
+//! signing agent was started with trading enabled (`--enable-trading`); the
+//! agent enforces this regardless of what the MCP believes.
 
 use std::str::FromStr;
 
@@ -13,7 +14,7 @@ use revolutx::{ClientOrderId, Decimal, OrderId, RevolutXClient, Side};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-const TRADING_DISABLED: &str = "trading is disabled; start the server with REVOLUTX_MCP_ENABLE_TRADING=1 to allow order placement and cancellation";
+const TRADING_DISABLED: &str = "trading is disabled on the signing agent; restart it with `revolutx agent start --enable-trading` to allow order placement and cancellation";
 
 /// Returns the tool definitions exposed via `tools/list`, filtered by whether
 /// trading is enabled.

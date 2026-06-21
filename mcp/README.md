@@ -19,68 +19,47 @@ Or run from a checkout: `cargo run -p revolutx-mcp`.
 
 ## Configuration
 
-The server is configured entirely through environment variables:
+The MCP **never handles credentials itself.** It connects to a running
+[`revolutx agent`](../cli/README.md#signing-agent-headless--no-tty-clients), which
+holds the encrypted keystore and does all signing and HTTP. The MCP therefore
+has no API key, no private key, and no environment setting of its own — it learns
+the target environment and the trading policy from the agent at connect time.
+
+The only configuration is a single, optional, non-sensitive variable:
 
 | Variable | Purpose |
 |---|---|
-| `REVOLUTX_AGENT_SOCKET` | **Recommended.** Path to a running [`revolutx agent`](../cli/README.md#signing-agent-headless--no-tty-clients)'s unix socket. The agent holds the keystore and does all signing + HTTP, so the MCP keeps **no key material**. When set, the credential variables below are ignored. |
-| `REVOLUTX_API_KEY` | API key — **plaintext dev fallback**, used only when `REVOLUTX_AGENT_SOCKET` is unset. Without credentials only the public tools work. |
-| `REVOLUTX_PRIVATE_KEY_PEM` | Ed25519 private key (PKCS#8 PEM contents) — dev fallback. |
-| `REVOLUTX_PRIVATE_KEY_PATH` | Path to the PEM file (used if `_PEM` is unset) — dev fallback. |
-| `REVOLUTX_ENVIRONMENT` | `production` (default) or `dev`. |
-| `REVOLUTX_MCP_ENABLE_TRADING` | Set to `1`/`true` to expose the order-mutating tools. Default: off (read-only). |
+| `REVOLUTX_AGENT_SOCKET` | Path to the agent's unix socket. Optional — defaults to `$XDG_RUNTIME_DIR/revolutx-agent.sock`. |
 
-### Recommended: via the signing agent (no plaintext keys)
+### Setup
 
-Keep your private key out of the MCP's environment entirely. Create an encrypted
-vault and start the agent once (it prompts for the master password); the MCP then
-connects to it:
+Create an encrypted vault once, and start the agent (it prompts for the master
+password); the MCP then connects to it:
 
 ```sh
 revolutx vault init --key-file private.pem   # one-time, prompts for API key + password
-revolutx agent start                         # unlocks the vault, serves on $XDG_RUNTIME_DIR/revolutx-agent.sock
+revolutx agent start                         # read-only
+# ...or, to permit order placement/cancellation through the MCP:
+revolutx agent start --enable-trading        # REAL TRADING
 ```
 
 ```json
 {
   "mcpServers": {
     "revolutx": {
-      "command": "revolutx-mcp",
-      "env": { "REVOLUTX_AGENT_SOCKET": "/run/user/1000/revolutx-agent.sock" }
+      "command": "revolutx-mcp"
     }
   }
 }
 ```
 
-The agent serves a single client and exits when it disconnects, so start the
-agent alongside the MCP; if the MCP restarts, restart the agent too.
+Add `"env": { "REVOLUTX_AGENT_SOCKET": "/path/to/agent.sock" }` only if the agent
+listens somewhere other than the default. The agent serves a single client and
+exits when it disconnects, so start it alongside the MCP; if the MCP restarts,
+restart the agent too.
 
-### Dev fallback: plaintext keys in the environment
-
-Generate a key pair and pass the credentials directly (less secure — the private
-key lives in the MCP's environment):
-
-```sh
-openssl genpkey -algorithm ed25519 -out private.pem
-openssl pkey -in private.pem -pubout -out public.pem
-```
-
-```json
-{
-  "mcpServers": {
-    "revolutx": {
-      "command": "revolutx-mcp",
-      "env": {
-        "REVOLUTX_API_KEY": "your-api-key",
-        "REVOLUTX_PRIVATE_KEY_PATH": "/absolute/path/to/private.pem"
-      }
-    }
-  }
-}
-```
-
-To allow placing and cancelling orders, add `"REVOLUTX_MCP_ENABLE_TRADING": "1"`
-to `env` — only do this if you understand it performs real trades.
+**Whether trading is allowed is the agent's decision** (`--enable-trading`), not
+the MCP's — nothing in the MCP's environment can enable it.
 
 ## Tools
 
@@ -89,7 +68,7 @@ Read-only (always available): `get_balances`, `get_currencies`, `get_pairs`,
 `get_last_trades`, `get_all_trades`, `get_private_trades`, `get_active_orders`,
 `get_historical_orders`, `get_order`, `get_order_fills`.
 
-Order mutation (only when `REVOLUTX_MCP_ENABLE_TRADING` is set):
+Order mutation (only when the agent was started with `--enable-trading`):
 `place_limit_order`, `place_market_order`, `cancel_order`, `cancel_all_orders`.
 
 Tool results are returned as pretty-printed JSON of the corresponding SDK
@@ -97,10 +76,11 @@ response. Decimal values are preserved as strings (never floats).
 
 ## Safety
 
-- Order-mutating tools are not even listed unless trading is explicitly enabled,
-  and calling one while disabled returns an error instead of trading.
-- The public market-data tools (`get_public_order_book`, `get_last_trades`) work
-  without any credentials.
+- The MCP holds **no key material** — the agent does all signing and HTTP, so a
+  compromised MCP environment cannot leak credentials.
+- Order-mutating tools are not even listed unless the agent enabled trading, and
+  the agent itself refuses any order request when trading is off — the MCP cannot
+  override that gate.
 - All diagnostics go to stderr; stdout carries only the JSON-RPC protocol.
 
 ## License

@@ -30,11 +30,17 @@ pub fn run(global: &GlobalOpts, command: AgentCmd) -> Res<()> {
         AgentCmd::Start {
             socket,
             idle_timeout,
-        } => start(global, socket, idle_timeout),
+            enable_trading,
+        } => start(global, socket, idle_timeout, enable_trading),
     }
 }
 
-fn start(global: &GlobalOpts, socket: Option<PathBuf>, idle_timeout: u64) -> Res<()> {
+fn start(
+    global: &GlobalOpts,
+    socket: Option<PathBuf>,
+    idle_timeout: u64,
+    enable_trading: bool,
+) -> Res<()> {
     let socket_path = socket.unwrap_or_else(default_socket_path);
 
     // Unlock the vault (prompts for the master password) BEFORE building the
@@ -58,10 +64,18 @@ fn start(global: &GlobalOpts, socket: Option<PathBuf>, idle_timeout: u64) -> Res
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    eprintln!("revolutx-agent: listening on {}", socket_path.display());
+    eprintln!(
+        "revolutx-agent: listening on {} (trading {})",
+        socket_path.display(),
+        if enable_trading {
+            "ENABLED"
+        } else {
+            "disabled"
+        }
+    );
     let result = runtime.block_on(async {
         tokio::select! {
-            served = serve(executor, &socket_path, on_connect) => served.map_err(Into::into),
+            served = serve(executor, &socket_path, enable_trading, on_connect) => served.map_err(Into::into),
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("revolutx-agent: shutting down");
                 Ok(())

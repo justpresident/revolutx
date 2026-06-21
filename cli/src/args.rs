@@ -104,6 +104,11 @@ pub enum AgentCmd {
         /// connected it is never timed out for being idle. 0 disables it.
         #[arg(long, default_value_t = 300)]
         idle_timeout: u64,
+        /// Allow the connected client to place and cancel orders (REAL TRADING).
+        /// Off by default: the agent refuses every order-mutating request. This
+        /// is the authoritative gate — clients cannot override it.
+        #[arg(long)]
+        enable_trading: bool,
     },
 }
 
