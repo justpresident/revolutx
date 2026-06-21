@@ -36,19 +36,27 @@ from `REVOLUTX_API_KEY` / `REVOLUTX_PRIVATE_KEY_PEM` / `REVOLUTX_PRIVATE_KEY_PAT
 
 A headless client (such as the MCP server) has no terminal to prompt for the
 master password. Run a **signing agent**: it unlocks the vault once, then signs
-and performs every request on behalf of clients that connect to its unix socket.
+and performs every request on behalf of the client connected to its unix socket.
 
 ```sh
 revolutx agent start                       # prompts once, then serves
-revolutx agent ping                        # check it's alive
-revolutx agent start --idle-timeout 900    # auto-lock after 15 min idle
+revolutx agent start --idle-timeout 600    # exit if no client connects in 10 min
+revolutx agent start --idle-timeout 0      # never auto-lock before connecting
 ```
 
-It is a **full proxy**: clients send a request description and receive only the
-response bytes — neither the private key nor the API key ever leaves the agent.
-The socket is created `0600` in `$XDG_RUNTIME_DIR` (itself user-private); there
-is no network transport. While serving, a watchdog thread keeps checking for an
-attached debugger and enforces the idle auto-lock.
+It is a **full proxy**: the client sends a request description and receives only
+the response bytes — neither the private key nor the API key ever leaves the
+agent. Protections:
+
+- **Single client.** The agent accepts exactly one connection and refuses the
+  rest. When that client disconnects, the daemon exits and the vault is
+  re-locked — reconnects are not allowed.
+- **Pre-connection idle timeout** (default 5 minutes). If no client connects in
+  time, the agent auto-locks and exits. Once a client *is* connected it is never
+  timed out for being idle.
+- **`0600` socket** in `$XDG_RUNTIME_DIR` (itself user-private); no network
+  transport.
+- A **watchdog thread** keeps checking for an attached debugger while serving.
 
 ## Safety
 

@@ -1,21 +1,23 @@
-//! The `revolutx agent` subcommand: a signing-agent daemon (`start`) and a
-//! liveness check (`ping`).
+//! The `revolutx agent start` subcommand: a single-client signing-agent daemon.
 //!
-//! `start` unlocks the vault once (interactive password) and serves a full proxy
-//! over a unix socket — it signs and performs every forwarded request, so the
-//! private key and API key never leave this process. A dedicated watchdog thread
-//! re-checks for an attached debugger and enforces the idle auto-lock.
+//! It unlocks the vault once (interactive password) and serves a full proxy over
+//! a unix socket — it signs and performs every forwarded request, so the private
+//! key and API key never leave this process. The agent accepts exactly one
+//! client and refuses the rest; when that client disconnects, the daemon exits
+//! and the vault is re-locked.
 //!
-//! The watchdog thread is spawned only after `main` has hardened the process
-//! (and after the `enable_ptrace_protection` fork) and before the async runtime
-//! starts — forking a multithreaded process is undefined behavior.
+//! A dedicated watchdog thread re-checks for an attached debugger and enforces
+//! the pre-connection idle timeout (auto-lock if no client ever connects). It is
+//! spawned only after `main` has hardened the process (and after the
+//! `enable_ptrace_protection` fork) and before the async runtime starts —
+//! forking a multithreaded process is undefined behavior.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-use revolutx::agent::{AgentExecutor, default_socket_path, serve};
+use revolutx::agent::{default_socket_path, serve};
 
 use crate::args::{AgentCmd, GlobalOpts};
 use crate::creds;
@@ -29,7 +31,6 @@ pub fn run(global: &GlobalOpts, command: AgentCmd) -> Res<()> {
             socket,
             idle_timeout,
         } => start(global, socket, idle_timeout),
-        AgentCmd::Ping { socket } => ping(global, socket),
     }
 }
 
@@ -41,17 +42,17 @@ fn start(global: &GlobalOpts, socket: Option<PathBuf>, idle_timeout: u64) -> Res
     let client = creds::client(global, true)?;
     let executor = client.executor();
 
-    // Activity timestamp for the idle auto-lock, bumped on every request.
-    let last_activity = Arc::new(AtomicU64::new(now_secs()));
+    // The watchdog stops counting toward the idle timeout once a client connects.
+    let connected = Arc::new(AtomicBool::new(false));
     spawn_watchdog(
         !global.insecure_allow_debugging,
-        Arc::clone(&last_activity),
+        Arc::clone(&connected),
         idle_timeout,
+        socket_path.clone(),
     );
-
-    let on_request: Arc<dyn Fn() + Send + Sync> = {
-        let last_activity = Arc::clone(&last_activity);
-        Arc::new(move || last_activity.store(now_secs(), Ordering::Relaxed))
+    let on_connect = {
+        let connected = Arc::clone(&connected);
+        move || connected.store(true, Ordering::Relaxed)
     };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -60,7 +61,7 @@ fn start(global: &GlobalOpts, socket: Option<PathBuf>, idle_timeout: u64) -> Res
     eprintln!("revolutx-agent: listening on {}", socket_path.display());
     let result = runtime.block_on(async {
         tokio::select! {
-            served = serve(executor, &socket_path, on_request) => served.map_err(Into::into),
+            served = serve(executor, &socket_path, on_connect) => served.map_err(Into::into),
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("revolutx-agent: shutting down");
                 Ok(())
@@ -72,61 +73,65 @@ fn start(global: &GlobalOpts, socket: Option<PathBuf>, idle_timeout: u64) -> Res
     result
 }
 
-fn ping(global: &GlobalOpts, socket: Option<PathBuf>) -> Res<()> {
-    let socket_path = socket.unwrap_or_else(default_socket_path);
-    let base_url = creds::environment(global).base_url();
-    let executor = AgentExecutor::new(&socket_path, base_url);
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(executor.ping())?;
-    println!("agent OK at {}", socket_path.display());
-    Ok(())
-}
-
 /// Spawns the continuous security watchdog (a dedicated thread, ticking every
 /// second). It exits the process on a clock anomaly, an attached debugger, or
-/// the idle timeout. No thread is spawned when nothing needs watching.
-fn spawn_watchdog(check_debugger: bool, last_activity: Arc<AtomicU64>, idle_timeout: u64) {
+/// the pre-connection idle timeout. No thread is spawned when nothing needs
+/// watching.
+fn spawn_watchdog(
+    check_debugger: bool,
+    connected: Arc<AtomicBool>,
+    idle_timeout: u64,
+    socket_path: PathBuf,
+) {
     if !check_debugger && idle_timeout == 0 {
         return;
     }
     let _ = std::thread::Builder::new()
         .name("revolutx-agent-watchdog".to_owned())
-        .spawn(move || watchdog_loop(check_debugger, &last_activity, idle_timeout));
+        .spawn(move || watchdog_loop(check_debugger, &connected, idle_timeout, &socket_path));
 }
 
-fn watchdog_loop(check_debugger: bool, last_activity: &AtomicU64, idle_timeout: u64) -> ! {
-    let mut prev = Instant::now();
+fn watchdog_loop(
+    check_debugger: bool,
+    connected: &AtomicBool,
+    idle_timeout: u64,
+    socket_path: &std::path::Path,
+) -> ! {
+    let start = Instant::now();
+    let mut prev = start;
     loop {
         std::thread::sleep(Duration::from_secs(1));
         let now = Instant::now();
+
         // A frozen or rewound monotonic clock is consistent with a debugger
         // pause or VM time manipulation.
         if now.saturating_duration_since(prev).is_zero() {
-            eprintln!("revolutx-agent: clock anomaly, locking and exiting");
-            std::process::exit(1);
+            exit(socket_path, 1, "clock anomaly");
         }
         prev = now;
 
         if check_debugger && revolutx::keystore::is_debugger_attached() {
-            eprintln!("revolutx-agent: debugger detected, locking and exiting");
-            std::process::exit(1);
+            exit(socket_path, 1, "debugger detected");
         }
 
-        if idle_timeout > 0 {
-            let idle = now_secs().saturating_sub(last_activity.load(Ordering::Relaxed));
-            if idle >= idle_timeout {
-                eprintln!("revolutx-agent: idle for {idle}s, locking and exiting");
-                std::process::exit(0);
-            }
+        // The idle timeout only applies until the first client connects; an
+        // established client is never timed out for being idle.
+        if idle_timeout > 0
+            && !connected.load(Ordering::Relaxed)
+            && now.saturating_duration_since(start).as_secs() >= idle_timeout
+        {
+            exit(
+                socket_path,
+                0,
+                "no client connected before the idle timeout",
+            );
         }
     }
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+fn exit(socket_path: &std::path::Path, code: i32, reason: &str) -> ! {
+    eprintln!("revolutx-agent: {reason}, locking and exiting");
+    // process::exit skips the daemon's normal cleanup, so remove the socket here.
+    let _ = std::fs::remove_file(socket_path);
+    std::process::exit(code);
 }

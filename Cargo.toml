@@ -55,7 +55,7 @@ zeroize = { version = "1", optional = true }
 rcypher = { version = "0.2", default-features = false, optional = true }
 bincode = { version = "2", optional = true }
 # Agent proxy (enabled by the `agent` feature): unix-socket transport + framing.
-tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "time"], optional = true }
+tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "time", "sync"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

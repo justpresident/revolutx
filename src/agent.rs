@@ -38,9 +38,15 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::error::{Error, Result};
 use crate::transport::{BoxFuture, RawResponse, RequestExecutor, RequestSpec};
 
-/// Largest accepted frame (16 MiB) — a sanity bound against a malformed or
-/// hostile length prefix.
-const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
+/// Largest request frame the agent will read (64 KiB). A request is a minified
+/// JSON order body plus a path/query — kilobytes at most. This is generous
+/// headroom that also bounds the agent's exposure to a hostile length prefix.
+const MAX_REQUEST_FRAME: u32 = 64 * 1024;
+
+/// Largest response frame a client will read (1 MiB). REST responses are
+/// paginated (order books, candle history, ticker lists, history pages) and stay
+/// well under this; it is a defensive ceiling, not an expected size.
+const MAX_RESPONSE_FRAME: u32 = 1024 * 1024;
 
 /// A request sent from a client to the agent.
 #[derive(Debug, Encode, Decode)]
@@ -105,11 +111,11 @@ async fn write_frame<T: Encode + Sync>(stream: &mut UnixStream, value: &T) -> st
     Ok(())
 }
 
-async fn read_frame_bytes(reader: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+async fn read_frame_bytes(reader: &mut UnixStream, max_len: u32) -> std::io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf);
-    if len > MAX_FRAME_LEN {
+    if len > max_len {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "frame exceeds the maximum size",
@@ -130,26 +136,39 @@ fn decode<T: Decode<()>>(bytes: &[u8]) -> std::io::Result<T> {
 
 /// A [`RequestExecutor`] that forwards every request to a running agent.
 ///
-/// A fresh unix-socket connection is opened per request, so it is cheap to clone
-/// and safe to use concurrently.
-#[derive(Debug, Clone)]
+/// It holds a **single persistent connection** for its lifetime — the agent
+/// accepts exactly one client and refuses the rest — and serializes requests
+/// over it, so concurrent [`execute`](RequestExecutor::execute) calls are safe
+/// but run one at a time.
+#[derive(Debug)]
 pub struct AgentExecutor {
-    socket_path: PathBuf,
     base_url: String,
+    conn: tokio::sync::Mutex<UnixStream>,
 }
 
 impl AgentExecutor {
-    /// Targets the agent at `socket_path`. `base_url` is informational only (the
-    /// agent owns the real base URL); pass the environment's base URL so
+    /// Connects to the agent at `socket_path`. `base_url` is informational only
+    /// (the agent owns the real base URL); pass the environment's base URL so
     /// [`crate::RevolutXClient::base_url`] reports something meaningful.
-    pub fn new(socket_path: impl Into<PathBuf>, base_url: impl Into<String>) -> Self {
-        Self {
-            socket_path: socket_path.into(),
+    pub async fn connect(
+        socket_path: impl AsRef<Path>,
+        base_url: impl Into<String>,
+    ) -> Result<Self> {
+        let socket_path = socket_path.as_ref();
+        let stream = UnixStream::connect(socket_path).await.map_err(|e| {
+            Error::agent(format!(
+                "cannot connect to agent at {}: {e}",
+                socket_path.display()
+            ))
+        })?;
+        Ok(Self {
             base_url: base_url.into(),
-        }
+            conn: tokio::sync::Mutex::new(stream),
+        })
     }
 
-    /// Checks that an agent is responding on the socket.
+    /// Checks that the agent is responding (sent over the established
+    /// connection).
     pub async fn ping(&self) -> Result<()> {
         match self.round_trip(&AgentRequest::Ping).await? {
             AgentResponse::Pong => Ok(()),
@@ -158,18 +177,18 @@ impl AgentExecutor {
     }
 
     async fn round_trip(&self, request: &AgentRequest) -> Result<AgentResponse> {
-        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
-            Error::agent(format!(
-                "cannot connect to agent at {}: {e}",
-                self.socket_path.display()
-            ))
-        })?;
-        write_frame(&mut stream, request)
-            .await
-            .map_err(|e| Error::agent(format!("failed to send request to agent: {e}")))?;
-        let bytes = read_frame_bytes(&mut stream)
-            .await
-            .map_err(|e| Error::agent(format!("failed to read agent response: {e}")))?;
+        // Hold the connection lock only for the write/read critical section, so a
+        // request fully completes before the next one starts on the shared
+        // stream; decoding happens after the guard is released.
+        let bytes = {
+            let mut conn = self.conn.lock().await;
+            write_frame(&mut conn, request)
+                .await
+                .map_err(|e| Error::agent(format!("failed to send request to agent: {e}")))?;
+            read_frame_bytes(&mut conn, MAX_RESPONSE_FRAME)
+                .await
+                .map_err(|e| Error::agent(format!("failed to read agent response: {e}")))?
+        };
         decode(&bytes).map_err(|e| Error::agent(format!("invalid agent response: {e}")))
     }
 }
@@ -209,31 +228,44 @@ impl RequestExecutor for AgentExecutor {
 
 // --- server side -----------------------------------------------------------
 
-/// Serves the agent protocol on a unix socket at `socket_path`.
+/// Serves the agent protocol on a unix socket at `socket_path` for **exactly one
+/// client**, then returns.
 ///
-/// Each `Execute` is dispatched to `executor` (which should be a
-/// credential-holding [`crate::transport::LocalExecutor`]). `on_request` is
-/// invoked once per received request — the daemon uses it to track activity for
-/// its idle auto-lock.
+/// The first connection is accepted and served (every `Execute` is dispatched to
+/// `executor`, a credential-holding [`crate::transport::LocalExecutor`]). Any
+/// further connection attempt is accepted and immediately closed — the agent is
+/// a single "trade as me" oracle, so concurrent clients and reconnects are
+/// refused. When the one client disconnects, this returns and the daemon exits,
+/// re-locking the vault. `on_connect` fires once, when that client connects — the
+/// daemon uses it to cancel its pre-connection idle timeout.
 ///
 /// The socket is created with `0600` permissions. If a live agent is already
 /// listening on `socket_path` this returns an error; a stale socket file (no
-/// listener) is removed and replaced. Runs until the listener errors.
+/// listener) is removed and replaced.
 pub async fn serve(
     executor: Arc<dyn RequestExecutor>,
     socket_path: &Path,
-    on_request: Arc<dyn Fn() + Send + Sync>,
+    on_connect: impl FnOnce() + Send,
 ) -> Result<()> {
     let listener = bind(socket_path).await?;
-    loop {
-        let (stream, _addr) = listener
-            .accept()
-            .await
-            .map_err(|e| Error::agent(format!("agent accept failed: {e}")))?;
-        let executor = Arc::clone(&executor);
-        let on_request = Arc::clone(&on_request);
-        tokio::spawn(handle_connection(executor, stream, on_request));
-    }
+
+    let (mut stream, _addr) = listener
+        .accept()
+        .await
+        .map_err(|e| Error::agent(format!("agent accept failed: {e}")))?;
+    on_connect();
+
+    // Keep the listener alive (so a second daemon's liveness probe still sees us)
+    // but refuse every further connection by closing it immediately.
+    let rejector = tokio::spawn(async move {
+        while let Ok((extra, _addr)) = listener.accept().await {
+            drop(extra);
+        }
+    });
+
+    handle_connection(executor.as_ref(), &mut stream).await;
+    rejector.abort();
+    Ok(())
 }
 
 /// Binds the socket, refusing to clobber a live agent and cleaning up a stale
@@ -270,28 +302,23 @@ fn set_socket_permissions(_socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(
-    executor: Arc<dyn RequestExecutor>,
-    mut stream: UnixStream,
-    on_request: Arc<dyn Fn() + Send + Sync>,
-) {
+async fn handle_connection(executor: &dyn RequestExecutor, stream: &mut UnixStream) {
     loop {
         // A closed connection or a malformed frame just ends this session.
-        let Ok(bytes) = read_frame_bytes(&mut stream).await else {
+        let Ok(bytes) = read_frame_bytes(stream, MAX_REQUEST_FRAME).await else {
             return;
         };
         let request: AgentRequest = match decode(&bytes) {
             Ok(request) => request,
             Err(_) => return,
         };
-        on_request();
 
         let response = match request {
             AgentRequest::Ping => AgentResponse::Pong,
-            AgentRequest::Execute(wire) => execute_forwarded(executor.as_ref(), wire).await,
+            AgentRequest::Execute(wire) => execute_forwarded(executor, wire).await,
         };
 
-        if write_frame(&mut stream, &response).await.is_err() {
+        if write_frame(stream, &response).await.is_err() {
             return;
         }
     }
@@ -360,78 +387,92 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
 
-        let noop: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         let server = {
             let socket = socket.clone();
-            tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, noop).await })
+            tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, || {}).await })
         };
         wait_for(&socket).await;
 
-        let executor = AgentExecutor::new(&socket, "http://stub/api/1.0");
+        // A single persistent connection carries many requests.
+        let executor = AgentExecutor::connect(&socket, "http://stub/api/1.0")
+            .await
+            .unwrap();
         executor.ping().await.unwrap();
 
-        let spec = RequestSpec::get("/balances");
-        let raw = executor.execute(spec).await.unwrap();
+        let raw = executor
+            .execute(RequestSpec::get("/balances"))
+            .await
+            .unwrap();
         assert_eq!(raw.status, 200);
         assert_eq!(raw.body, b"/balances");
 
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn refuses_a_second_agent_on_the_same_socket() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("agent.sock");
-
-        let noop: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
-        let server = {
-            let socket = socket.clone();
-            let noop = Arc::clone(&noop);
-            tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, noop).await })
-        };
-        wait_for(&socket).await;
-
-        let err = bind(&socket).await.unwrap_err();
-        assert!(matches!(err, Error::Agent { .. }));
+        let raw = executor
+            .execute(RequestSpec::get("/orders/active"))
+            .await
+            .unwrap();
+        assert_eq!(raw.body, b"/orders/active");
 
         server.abort();
     }
 
     #[tokio::test]
-    async fn activity_callback_fires_per_request() {
+    async fn on_connect_fires_once_when_the_client_connects() {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
 
-        let count = Arc::new(AtomicU64::new(0));
-        let on_request: Arc<dyn Fn() + Send + Sync> = {
-            let count = Arc::clone(&count);
-            Arc::new(move || {
-                count.fetch_add(1, Ordering::Relaxed);
-            })
+        let connects = Arc::new(AtomicU64::new(0));
+        let on_connect = {
+            let connects = Arc::clone(&connects);
+            move || {
+                connects.fetch_add(1, Ordering::Relaxed);
+            }
         };
         let server = {
             let socket = socket.clone();
-            tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, on_request).await })
+            tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, on_connect).await })
+        };
+        wait_for(&socket).await;
+        assert_eq!(connects.load(Ordering::Relaxed), 0, "not yet connected");
+
+        let executor = AgentExecutor::connect(&socket, "http://stub/api/1.0")
+            .await
+            .unwrap();
+        executor.ping().await.unwrap();
+        // Two requests over one connection still mean one `on_connect`.
+        executor.ping().await.unwrap();
+        assert_eq!(connects.load(Ordering::Relaxed), 1);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refuses_a_second_client_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+
+        let server = {
+            let socket = socket.clone();
+            tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, || {}).await })
         };
         wait_for(&socket).await;
 
-        let executor = AgentExecutor::new(&socket, "http://stub/api/1.0");
-        executor.ping().await.unwrap();
-        executor
-            .execute(RequestSpec::get("/orders/active"))
+        // First client owns the connection.
+        let first = AgentExecutor::connect(&socket, "http://stub/api/1.0")
             .await
             .unwrap();
+        first.ping().await.unwrap();
 
-        // Give the spawned connection task a moment to record the activity.
-        for _ in 0..200 {
-            if count.load(Ordering::Relaxed) >= 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(count.load(Ordering::Relaxed) >= 2);
+        // A second client connects at the socket layer but is immediately closed
+        // by the rejector, so its first request fails.
+        let second = AgentExecutor::connect(&socket, "http://stub/api/1.0")
+            .await
+            .unwrap();
+        assert!(second.ping().await.is_err());
+
+        // The first client is unaffected.
+        first.ping().await.unwrap();
 
         server.abort();
     }
