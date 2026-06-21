@@ -24,8 +24,8 @@
 use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
-use rcypher::{Cypher, CypherVersion, EncryptionKey, save_encrypted};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use rcypher::{Cypher, CypherVersion, EncryptionKey};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::{Ed25519Signer, RequestAuth, Signer};
 use crate::error::{Error, Result};
@@ -44,10 +44,9 @@ pub struct GeneratedKeyPair {
 
 /// Generates a new Ed25519 key pair from operating-system randomness.
 ///
-/// The private key is returned as PKCS#8 PEM (the same format
-/// [`Keystore::create`] and the SDK consume) and never touches the disk
-/// unencrypted; the public key is returned as SPKI PEM to register with the
-/// exchange.
+/// The private key is returned as PKCS#8 PEM (the same format the vault and the
+/// SDK consume) and never touches the disk unencrypted; the public key is
+/// returned as SPKI PEM to register with the exchange.
 pub fn generate_key_pair() -> std::result::Result<GeneratedKeyPair, KeystoreError> {
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::EncodePrivateKey;
@@ -74,12 +73,37 @@ pub fn generate_key_pair() -> std::result::Result<GeneratedKeyPair, KeystoreErro
     })
 }
 
-/// The secrets stored in the vault. Serialized with bincode (compact binary,
-/// no text-escaping of the PEM) and zeroized on drop.
-#[derive(Encode, Decode, Zeroize, ZeroizeOnDrop)]
-struct VaultContents {
-    api_key: String,
-    private_key_pem: String,
+/// The decrypted vault contents: `name -> value` records. Serialized with
+/// bincode (compact, no text-escaping of the PEM). The sensitive string contents
+/// are zeroized on drop, so a decrypted copy never outlives the operation that
+/// produced it.
+#[derive(Encode, Decode, Default)]
+struct Records(Vec<(String, String)>);
+
+impl Records {
+    fn get(&self, name: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn set(&mut self, name: &str, value: &str) {
+        if let Some(entry) = self.0.iter_mut().find(|(key, _)| key == name) {
+            value.clone_into(&mut entry.1);
+        } else {
+            self.0.push((name.to_owned(), value.to_owned()));
+        }
+    }
+}
+
+impl Drop for Records {
+    fn drop(&mut self) {
+        for (name, value) in &mut self.0 {
+            name.zeroize();
+            value.zeroize();
+        }
+    }
 }
 
 /// Options controlling vault key derivation and runtime hardening.
@@ -129,138 +153,184 @@ pub enum KeystoreError {
     Contents(String),
 }
 
-/// A new vault from [`Keystore::init`]: its encryption key is derived but its
-/// credentials have not been written yet. Fill it in with [`NewVault::store`].
-pub struct NewVault {
+/// An encrypted credential store.
+///
+/// Initialize it from a master password with [`Keystore::open`] — the encryption
+/// key is derived once (Argon2id) and the encrypted blob is held in memory. Read
+/// and write individual records with [`get`](Keystore::get) /
+/// [`set`](Keystore::set); each decrypts the blob **transiently** and wipes the
+/// plaintext immediately, so credentials never sit decrypted between operations.
+/// Persist changes to disk with [`save`](Keystore::save).
+///
+/// It implements [`Signer`] by reading the [`API_KEY`](Keystore::API_KEY) and
+/// [`PRIVATE_KEY_PEM`](Keystore::PRIVATE_KEY_PEM) records on each request.
+pub struct Keystore {
     cypher: Cypher,
+    /// The encrypted records (ciphertext; not secret) — the single in-memory copy
+    /// of the vault contents.
+    blob: Vec<u8>,
     path: PathBuf,
 }
 
-impl NewVault {
-    /// Encrypts the API key and Ed25519 private key into the vault and writes it
-    /// to disk (atomically, `0600`).
-    pub fn store(
-        self,
-        api_key: &str,
-        private_key_pem: &str,
-    ) -> std::result::Result<(), KeystoreError> {
-        let contents = VaultContents {
-            api_key: api_key.to_owned(),
-            private_key_pem: private_key_pem.to_owned(),
-        };
-        let plaintext = Zeroizing::new(
-            bincode::encode_to_vec(&contents, bincode::config::standard())
-                .map_err(|e| KeystoreError::Contents(e.to_string()))?,
-        );
-        // `save_encrypted` encrypts and atomically persists (0600 temp file).
-        save_encrypted(&self.cypher, plaintext.as_slice(), &self.path)
-            .map_err(|e| KeystoreError::Crypto(e.to_string()))?;
-        Ok(())
-    }
-}
-
-/// An opened encrypted credential vault, usable as a [`Signer`].
-pub struct Keystore {
-    cypher: Cypher,
-    /// The encrypted blob (ciphertext; not secret). Re-decrypted per request.
-    blob: Vec<u8>,
-}
-
 impl Keystore {
-    /// Creates a new vault at `path` holding `api_key` and `private_key_pem`,
-    /// encrypted with `password`. Uses secure defaults.
-    pub fn create(
-        path: &Path,
-        password: &str,
-        api_key: &str,
-        private_key_pem: &str,
-    ) -> std::result::Result<(), KeystoreError> {
-        Self::create_with(
-            path,
-            password,
-            api_key,
-            private_key_pem,
-            &KeystoreOptions::default(),
-        )
-    }
+    /// Record name for the Revolut X API key.
+    pub const API_KEY: &'static str = "api_key";
+    /// Record name for the Ed25519 private key (PKCS#8 PEM).
+    pub const PRIVATE_KEY_PEM: &'static str = "private_key_pem";
 
-    /// Like [`Keystore::create`] with explicit [`KeystoreOptions`].
-    pub fn create_with(
-        path: &Path,
-        password: &str,
-        api_key: &str,
-        private_key_pem: &str,
-        options: &KeystoreOptions,
-    ) -> std::result::Result<(), KeystoreError> {
-        Self::init(path, password, options)?.store(api_key, private_key_pem)
-    }
-
-    /// Initializes a new vault at `path`, deriving its encryption key from
-    /// `password` (Argon2id).
-    ///
-    /// The returned [`NewVault`] holds only the derived key, so the caller can
-    /// **wipe the password immediately** and then write the credentials with
-    /// [`NewVault::store`] once they are gathered — the password need not stay
-    /// resident while, say, the user creates an API key on the exchange website.
-    pub fn init(
-        path: &Path,
-        password: &str,
-        options: &KeystoreOptions,
-    ) -> std::result::Result<NewVault, KeystoreError> {
-        let key = EncryptionKey::from_password_with_params(
-            CypherVersion::default(),
-            password,
-            &options.argon2,
-        )
-        .map_err(|e| KeystoreError::Crypto(e.to_string()))?;
-        Ok(NewVault {
-            cypher: Cypher::with_trace_detection(key, options.trace_detection),
-            path: path.to_owned(),
-        })
-    }
-
-    /// Opens the vault at `path`, deriving the key from `password`. Uses secure
-    /// defaults. Fails if the password is wrong or the file is corrupted.
+    /// Opens the vault at `path`, deriving the key from `password`, with secure
+    /// defaults. See [`Keystore::open_with`].
     pub fn open(path: &Path, password: &str) -> std::result::Result<Self, KeystoreError> {
         Self::open_with(path, password, &KeystoreOptions::default())
     }
 
-    /// Like [`Keystore::open`] with explicit [`KeystoreOptions`].
+    /// Opens the vault at `path`, deriving the key from `password`.
+    ///
+    /// If the file exists it is loaded and the password verified (an error if it
+    /// is wrong or the file is corrupted). If it does **not** exist, a new empty
+    /// vault is initialized in memory — populate it with [`set`](Keystore::set)
+    /// and write it with [`save`](Keystore::save).
     pub fn open_with(
         path: &Path,
         password: &str,
         options: &KeystoreOptions,
     ) -> std::result::Result<Self, KeystoreError> {
-        let blob = std::fs::read(path)?;
-        let key = EncryptionKey::for_data_with_params(password, &blob, &options.argon2)
-            .map_err(|e| KeystoreError::Unlock(e.to_string()))?;
-        let cypher = Cypher::with_trace_detection(key, options.trace_detection);
-        // Decrypt once up front so a wrong password fails here, not at first use.
-        cypher
-            .decrypt(&blob)
-            .map_err(|e| KeystoreError::Unlock(e.to_string()))?;
-        Ok(Self { cypher, blob })
+        let (cypher, blob) = if path.exists() {
+            let blob = std::fs::read(path)?;
+            let key = EncryptionKey::for_data_with_params(password, &blob, &options.argon2)
+                .map_err(|e| KeystoreError::Unlock(e.to_string()))?;
+            let cypher = Cypher::with_trace_detection(key, options.trace_detection);
+            // Decrypt once up front so a wrong password fails here, not at first use.
+            cypher
+                .decrypt(&blob)
+                .map_err(|e| KeystoreError::Unlock(e.to_string()))?;
+            (cypher, blob)
+        } else {
+            let key = EncryptionKey::from_password_with_params(
+                CypherVersion::default(),
+                password,
+                &options.argon2,
+            )
+            .map_err(|e| KeystoreError::Crypto(e.to_string()))?;
+            let cypher = Cypher::with_trace_detection(key, options.trace_detection);
+            let blob = encrypt_records(&cypher, &Records::default())?;
+            (cypher, blob)
+        };
+        Ok(Self {
+            cypher,
+            blob,
+            path: path.to_owned(),
+        })
     }
+
+    /// Reads a record's value, or `None` if it is not set. The value is decrypted
+    /// transiently and returned in a [`Zeroizing`] wrapper.
+    pub fn get(&self, name: &str) -> std::result::Result<Option<Zeroizing<String>>, KeystoreError> {
+        Ok(self
+            .decrypt()?
+            .get(name)
+            .map(|value| Zeroizing::new(value.to_owned())))
+    }
+
+    /// Inserts or replaces a record, updating the in-memory encrypted blob. Call
+    /// [`save`](Keystore::save) to persist it.
+    pub fn set(&mut self, name: &str, value: &str) -> std::result::Result<(), KeystoreError> {
+        let mut records = self.decrypt()?;
+        records.set(name, value);
+        self.blob = encrypt_records(&self.cypher, &records)?;
+        Ok(())
+    }
+
+    /// Writes the in-memory encrypted blob to disk, atomically and `0600`.
+    pub fn save(&self) -> std::result::Result<(), KeystoreError> {
+        atomic_write(&self.path, &self.blob)?;
+        Ok(())
+    }
+
+    /// Decrypts the blob into its records, which are zeroized when dropped.
+    fn decrypt(&self) -> std::result::Result<Records, KeystoreError> {
+        let plaintext = self
+            .cypher
+            .decrypt(&self.blob)
+            .map_err(|e| KeystoreError::Crypto(e.to_string()))?;
+        let (records, _) =
+            bincode::decode_from_slice(plaintext.as_slice(), bincode::config::standard())
+                .map_err(|e| KeystoreError::Contents(e.to_string()))?;
+        Ok(records)
+    }
+}
+
+/// Encrypts `records` into a self-contained blob (header carries the salt + IV).
+fn encrypt_records(
+    cypher: &Cypher,
+    records: &Records,
+) -> std::result::Result<Vec<u8>, KeystoreError> {
+    let plaintext = Zeroizing::new(
+        bincode::encode_to_vec(records, bincode::config::standard())
+            .map_err(|e| KeystoreError::Contents(e.to_string()))?,
+    );
+    cypher
+        .encrypt(plaintext.as_slice())
+        .map_err(|e| KeystoreError::Crypto(e.to_string()))
+}
+
+/// Atomically writes `data` to `path` with `0600` permissions: write a unique
+/// temp file in the same directory, fsync, then rename it over `path`.
+fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "vault path has no file name",
+        )
+    })?;
+    let tmp_name = format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id()
+    );
+    let tmp = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from(&tmp_name), |parent| parent.join(&tmp_name));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let write = (|| {
+        let mut file = options.open(&tmp)?;
+        file.write_all(data)?;
+        file.sync_all()
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, path)
 }
 
 impl Signer for Keystore {
     fn authenticate(&self, message: &[u8]) -> Result<RequestAuth> {
-        // Decrypt the vault for this request only; everything below is wiped
-        // when the scope ends (plaintext via Zeroizing, contents via
-        // ZeroizeOnDrop, the ephemeral signing key via ed25519-dalek's zeroize).
-        let plaintext = self
-            .cypher
-            .decrypt(&self.blob)
-            .map_err(|e| Error::Signing {
-                message: format!("vault decrypt failed: {e}"),
+        // Decrypt the vault for this request only; `records` (with the decrypted
+        // secrets) is zeroized when this scope ends, as is the ephemeral signing
+        // key (ed25519-dalek's zeroize feature).
+        let records = self.decrypt().map_err(|e| Error::Signing {
+            message: format!("vault decrypt failed: {e}"),
+        })?;
+        let api_key = records.get(Self::API_KEY).ok_or_else(|| Error::Signing {
+            message: format!("vault has no '{}' record", Self::API_KEY),
+        })?;
+        let private_key_pem = records
+            .get(Self::PRIVATE_KEY_PEM)
+            .ok_or_else(|| Error::Signing {
+                message: format!("vault has no '{}' record", Self::PRIVATE_KEY_PEM),
             })?;
-        let (contents, _): (VaultContents, usize) =
-            bincode::decode_from_slice(plaintext.as_slice(), bincode::config::standard()).map_err(
-                |e| Error::Signing {
-                    message: format!("vault contents invalid: {e}"),
-                },
-            )?;
-        let signer = Ed25519Signer::from_pem(contents.api_key.as_str(), &contents.private_key_pem)?;
+        let signer = Ed25519Signer::from_pem(api_key, private_key_pem)?;
         signer.authenticate(message)
     }
 }
@@ -293,11 +363,19 @@ mod tests {
         }
     }
 
+    /// Creates a vault at `path` with the two credentials and persists it.
+    fn write_vault(path: &Path, password: &str, api_key: &str, pem: &str) {
+        let mut vault = Keystore::open_with(path, password, &test_options()).unwrap();
+        vault.set(Keystore::API_KEY, api_key).unwrap();
+        vault.set(Keystore::PRIVATE_KEY_PEM, pem).unwrap();
+        vault.save().unwrap();
+    }
+
     #[test]
     fn vault_round_trips_and_signs_identically() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault.rcx");
-        Keystore::create_with(&path, "master-pw", "api-key", TEST_PEM, &test_options()).unwrap();
+        write_vault(&path, "master-pw", "api-key", TEST_PEM);
 
         let keystore = Keystore::open_with(&path, "master-pw", &test_options()).unwrap();
         let message = signing_message(1_700_000_000_000, "GET", "/api/1.0/balances", "", b"");
@@ -325,14 +403,7 @@ mod tests {
         // parses, and signing produces a stable signature for a fixed message.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault.rcx");
-        Keystore::create_with(
-            &path,
-            "pw",
-            "api-key",
-            &generated.private_pem,
-            &test_options(),
-        )
-        .unwrap();
+        write_vault(&path, "pw", "api-key", &generated.private_pem);
         let keystore = Keystore::open_with(&path, "pw", &test_options()).unwrap();
         let message = signing_message(1_700_000_000_000, "GET", "/api/1.0/balances", "", b"");
         let auth = keystore.authenticate(&message).unwrap();
@@ -353,8 +424,30 @@ mod tests {
     fn wrong_password_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault.rcx");
-        Keystore::create_with(&path, "right", "k", TEST_PEM, &test_options()).unwrap();
+        write_vault(&path, "right", "k", TEST_PEM);
         assert!(Keystore::open_with(&path, "wrong", &test_options()).is_err());
+    }
+
+    #[test]
+    fn records_round_trip_and_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.rcx");
+        let mut vault = Keystore::open_with(&path, "pw", &test_options()).unwrap();
+        assert!(vault.get("api_key").unwrap().is_none(), "empty to start");
+        vault.set("api_key", "first").unwrap();
+        vault.set("api_key", "second").unwrap(); // overwrite
+        vault.save().unwrap();
+
+        let reopened = Keystore::open_with(&path, "pw", &test_options()).unwrap();
+        assert_eq!(
+            reopened
+                .get("api_key")
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("second")
+        );
+        assert!(reopened.get("missing").unwrap().is_none());
     }
 
     #[test]
@@ -362,7 +455,7 @@ mod tests {
         use std::sync::Arc;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault.rcx");
-        Keystore::create_with(&path, "pw", "k", TEST_PEM, &test_options()).unwrap();
+        write_vault(&path, "pw", "k", TEST_PEM);
         let keystore = Keystore::open_with(&path, "pw", &test_options()).unwrap();
 
         let client = crate::RevolutXClient::builder()

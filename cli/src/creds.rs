@@ -91,33 +91,36 @@ fn init_vault(global: &GlobalOpts, key_file: Option<&Path>) -> Res<()> {
     create_private_dir(path.parent())?;
     let options = keystore_options(global);
 
-    // 1. Set the master password (with confirmation), initialize the vault (which
-    //    derives its key), and wipe the password immediately — it is not needed
-    //    past this point.
+    // 1. Set the master password (with confirmation), initialize the store (which
+    //    derives the key), and wipe the password immediately — not needed past here.
     let password = Zeroizing::new(rpassword::prompt_password("New master password: ")?);
     let confirm = Zeroizing::new(rpassword::prompt_password("Confirm master password: ")?);
     if password.as_str() != confirm.as_str() {
         return Err("passwords do not match".into());
     }
     drop(confirm);
-    let vault = Keystore::init(&path, &password, &options)?;
+    let mut vault = Keystore::open_with(&path, &password, &options)?;
     drop(password);
 
-    // 2. Key material: generate a fresh pair (default) or import an existing PEM.
-    let pem: Zeroizing<String> = if let Some(key_file) = key_file {
-        Zeroizing::new(std::fs::read_to_string(key_file)?)
+    // 2. Put the private key into the store, then wipe its plaintext — during the
+    //    API-key step below it lives only encrypted in the vault. Generate a fresh
+    //    pair (default) or import an existing PEM.
+    if let Some(key_file) = key_file {
+        let pem = Zeroizing::new(std::fs::read_to_string(key_file)?);
+        vault.set(Keystore::PRIVATE_KEY_PEM, &pem)?;
     } else {
         let pair = revolutx::generate_key_pair()?;
+        vault.set(Keystore::PRIVATE_KEY_PEM, &pair.private_pem)?;
         print_onboarding(&pair.public_pem);
-        pair.private_pem
-    };
+    }
 
-    // 3. The API key — created on the website using the public key above, then
-    //    pasted here (hidden input, like a password).
+    // 3. Put the API key into the store — created on the website using the public
+    //    key above, then pasted here (hidden input, like a password).
     let api_key = Zeroizing::new(rpassword::prompt_password("Paste your API key: ")?);
+    vault.set(Keystore::API_KEY, &api_key)?;
 
-    // 4. Write the credentials into the now-initialized vault.
-    vault.store(&api_key, &pem)?;
+    // 4. Persist the encrypted vault to disk.
+    vault.save()?;
 
     println!(
         "\nVault created at {}. Initialization complete.",
