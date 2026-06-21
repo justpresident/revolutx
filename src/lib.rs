@@ -116,7 +116,9 @@ pub use client::{ClientBuilder, Environment, RevolutXClient};
 pub use config::{ClientConfig, ConfigError, client_from_env};
 pub use error::{ApiError, ApiErrorKind, Error, Result};
 #[cfg(feature = "keystore")]
-pub use keystore::{GeneratedKeyPair, Keystore, KeystoreError, KeystoreOptions, generate_key_pair};
+pub use keystore::{
+    GeneratedKeyPair, Keystore, KeystoreError, KeystoreOptions, NewVault, generate_key_pair,
+};
 pub use model::Page;
 #[cfg(feature = "rest")]
 pub use model::RawPage;

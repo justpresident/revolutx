@@ -21,7 +21,7 @@
 //! convenience. The vault's cipher also refuses to operate while a debugger is
 //! attached unless [`KeystoreOptions::trace_detection`] is set to `false`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
 use rcypher::{Cypher, CypherVersion, EncryptionKey, save_encrypted};
@@ -129,6 +129,36 @@ pub enum KeystoreError {
     Contents(String),
 }
 
+/// A new vault from [`Keystore::init`]: its encryption key is derived but its
+/// credentials have not been written yet. Fill it in with [`NewVault::store`].
+pub struct NewVault {
+    cypher: Cypher,
+    path: PathBuf,
+}
+
+impl NewVault {
+    /// Encrypts the API key and Ed25519 private key into the vault and writes it
+    /// to disk (atomically, `0600`).
+    pub fn store(
+        self,
+        api_key: &str,
+        private_key_pem: &str,
+    ) -> std::result::Result<(), KeystoreError> {
+        let contents = VaultContents {
+            api_key: api_key.to_owned(),
+            private_key_pem: private_key_pem.to_owned(),
+        };
+        let plaintext = Zeroizing::new(
+            bincode::encode_to_vec(&contents, bincode::config::standard())
+                .map_err(|e| KeystoreError::Contents(e.to_string()))?,
+        );
+        // `save_encrypted` encrypts and atomically persists (0600 temp file).
+        save_encrypted(&self.cypher, plaintext.as_slice(), &self.path)
+            .map_err(|e| KeystoreError::Crypto(e.to_string()))?;
+        Ok(())
+    }
+}
+
 /// An opened encrypted credential vault, usable as a [`Signer`].
 pub struct Keystore {
     cypher: Cypher,
@@ -162,25 +192,31 @@ impl Keystore {
         private_key_pem: &str,
         options: &KeystoreOptions,
     ) -> std::result::Result<(), KeystoreError> {
-        let contents = VaultContents {
-            api_key: api_key.to_owned(),
-            private_key_pem: private_key_pem.to_owned(),
-        };
-        let plaintext = Zeroizing::new(
-            bincode::encode_to_vec(&contents, bincode::config::standard())
-                .map_err(|e| KeystoreError::Contents(e.to_string()))?,
-        );
+        Self::init(path, password, options)?.store(api_key, private_key_pem)
+    }
+
+    /// Initializes a new vault at `path`, deriving its encryption key from
+    /// `password` (Argon2id).
+    ///
+    /// The returned [`NewVault`] holds only the derived key, so the caller can
+    /// **wipe the password immediately** and then write the credentials with
+    /// [`NewVault::store`] once they are gathered — the password need not stay
+    /// resident while, say, the user creates an API key on the exchange website.
+    pub fn init(
+        path: &Path,
+        password: &str,
+        options: &KeystoreOptions,
+    ) -> std::result::Result<NewVault, KeystoreError> {
         let key = EncryptionKey::from_password_with_params(
             CypherVersion::default(),
             password,
             &options.argon2,
         )
         .map_err(|e| KeystoreError::Crypto(e.to_string()))?;
-        let cypher = Cypher::with_trace_detection(key, options.trace_detection);
-        // `save_encrypted` encrypts and atomically persists (0600 temp file).
-        save_encrypted(&cypher, plaintext.as_slice(), path)
-            .map_err(|e| KeystoreError::Crypto(e.to_string()))?;
-        Ok(())
+        Ok(NewVault {
+            cypher: Cypher::with_trace_detection(key, options.trace_detection),
+            path: path.to_owned(),
+        })
     }
 
     /// Opens the vault at `path`, deriving the key from `password`. Uses secure
