@@ -17,6 +17,10 @@ pub enum OrderType {
     Conditional,
     /// A take-profit / stop-loss configuration for a position.
     Tpsl,
+    /// A type this SDK version does not recognize (forward compatibility — the
+    /// exchange may add order types without an API-version bump).
+    #[serde(other)]
+    Unknown,
 }
 
 impl OrderType {
@@ -27,6 +31,7 @@ impl OrderType {
             Self::Limit => "limit",
             Self::Conditional => "conditional",
             Self::Tpsl => "tpsl",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -49,6 +54,11 @@ pub enum OrderStatus {
     Rejected,
     /// Replaced by another order.
     Replaced,
+    /// A status this SDK version does not recognize (forward compatibility — the
+    /// exchange may add lifecycle states without an API-version bump). Lets a
+    /// page of orders deserialize instead of failing wholesale on one new value.
+    #[serde(other)]
+    Unknown,
 }
 
 impl OrderStatus {
@@ -62,6 +72,7 @@ impl OrderStatus {
             Self::Cancelled => "cancelled",
             Self::Rejected => "rejected",
             Self::Replaced => "replaced",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -76,6 +87,9 @@ pub enum TimeInForce {
     Ioc,
     /// Fill or kill.
     Fok,
+    /// A value this SDK version does not recognize (forward compatibility).
+    #[serde(other)]
+    Unknown,
 }
 
 /// An execution instruction attached to an order.
@@ -86,6 +100,10 @@ pub enum ExecutionInstruction {
     AllowTaker,
     /// Only rest on the book (never take liquidity).
     PostOnly,
+    /// A value this SDK version does not recognize (forward compatibility). Only
+    /// produced when reading a response; never send it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The order type produced when a trigger fires.

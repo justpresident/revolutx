@@ -468,6 +468,9 @@ struct RawAck {
 
 impl RawAck {
     fn into_ack(self) -> Result<OrderAck> {
+        // Reached only after a 2xx response deserialized into `RawAck` but carried
+        // no ack object. Order placement/replacement both return HTTP 200 on
+        // success (per the spec), so 200 is the accurate status here, not a guess.
         self.data.into_first().ok_or_else(|| Error::Unexpected {
             status: 200,
             body: "order acknowledgement response contained no data".to_string(),

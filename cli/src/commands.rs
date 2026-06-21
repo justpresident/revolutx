@@ -166,12 +166,22 @@ async fn market(global: &GlobalOpts, client: &RevolutXClient, command: MarketCmd
             }
             Ok(())
         }
-        MarketCmd::Watch { symbol, interval } => loop {
-            let book = client.market_data().order_book(&symbol).await?;
-            println!("--- {symbol} @ {} ---", book.timestamp);
-            print_book_levels(&book);
-            tokio::time::sleep(Duration::from_secs(interval)).await;
-        },
+        MarketCmd::Watch { symbol, interval } => {
+            // A long-running poll: tolerate transient errors (log and keep going)
+            // and honor --json; clamp 0 so it never busy-loops.
+            let interval = interval.max(1);
+            loop {
+                match client.market_data().order_book(&symbol).await {
+                    Ok(book) if global.json => output::json(&book)?,
+                    Ok(book) => {
+                        println!("--- {symbol} @ {} ---", book.timestamp);
+                        print_book_levels(&book);
+                    }
+                    Err(e) => eprintln!("watch: {e}"),
+                }
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+            }
+        }
     }
 }
 
@@ -455,16 +465,17 @@ fn print_orders(global: &GlobalOpts, page: &Page<Order>) -> Res {
         return output::json(page);
     }
     println!(
-        "{:<38} {:<5} {:<8} {:<16} {:>16} {:>16}",
-        "ID", "SIDE", "TYPE", "STATUS", "QTY", "PRICE"
+        "{:<38} {:<5} {:<8} {:<18} {:>16} {:>16} {:>16}",
+        "ID", "SIDE", "TYPE", "STATUS", "FILLED", "QTY", "PRICE"
     );
     for o in &page.items {
         println!(
-            "{:<38} {:<5} {:<8} {:<16} {:>16} {:>16}",
+            "{:<38} {:<5} {:<8} {:<18} {:>16} {:>16} {:>16}",
             o.id,
             o.side,
             o.order_type.as_str(),
             o.status.as_str(),
+            o.filled_quantity,
             o.quantity,
             o.price.map(|p| p.to_string()).unwrap_or_default()
         );

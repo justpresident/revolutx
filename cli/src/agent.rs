@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use revolutx::agent::{default_socket_path, serve};
+use tokio::sync::Notify;
 
 use crate::args::{AgentCmd, GlobalOpts};
 use crate::creds;
@@ -50,11 +51,15 @@ fn start(
 
     // The watchdog stops counting toward the idle timeout once a client connects.
     let connected = Arc::new(AtomicBool::new(false));
+    // The idle timeout shuts down *gracefully* (so the keystore's key zeroizes on
+    // Drop); only a debugger/clock anomaly hard-exits immediately.
+    let idle_shutdown = Arc::new(Notify::new());
     spawn_watchdog(
         !global.insecure_allow_debugging,
         Arc::clone(&connected),
         idle_timeout,
         socket_path.clone(),
+        Arc::clone(&idle_shutdown),
     );
     let on_connect = {
         let connected = Arc::clone(&connected);
@@ -80,6 +85,10 @@ fn start(
                 eprintln!("revolutx-agent: shutting down");
                 Ok(())
             }
+            () = idle_shutdown.notified() => {
+                eprintln!("revolutx-agent: idle timeout, locking and exiting");
+                Ok(())
+            }
         }
     });
     // Best-effort cleanup so the next start does not see a stale socket.
@@ -96,13 +105,22 @@ fn spawn_watchdog(
     connected: Arc<AtomicBool>,
     idle_timeout: u64,
     socket_path: PathBuf,
+    idle_shutdown: Arc<Notify>,
 ) {
     if !check_debugger && idle_timeout == 0 {
         return;
     }
     let _ = std::thread::Builder::new()
         .name("revolutx-agent-watchdog".to_owned())
-        .spawn(move || watchdog_loop(check_debugger, &connected, idle_timeout, &socket_path));
+        .spawn(move || {
+            watchdog_loop(
+                check_debugger,
+                &connected,
+                idle_timeout,
+                &socket_path,
+                &idle_shutdown,
+            );
+        });
 }
 
 fn watchdog_loop(
@@ -110,7 +128,8 @@ fn watchdog_loop(
     connected: &AtomicBool,
     idle_timeout: u64,
     socket_path: &std::path::Path,
-) -> ! {
+    idle_shutdown: &Notify,
+) {
     let start = Instant::now();
     let mut prev = start;
     loop {
@@ -118,7 +137,7 @@ fn watchdog_loop(
         let now = Instant::now();
 
         // A frozen or rewound monotonic clock is consistent with a debugger
-        // pause or VM time manipulation.
+        // pause or VM time manipulation — exit *now*, no graceful unwind.
         if now.saturating_duration_since(prev).is_zero() {
             exit(socket_path, 1, "clock anomaly");
         }
@@ -129,16 +148,15 @@ fn watchdog_loop(
         }
 
         // The idle timeout only applies until the first client connects; an
-        // established client is never timed out for being idle.
+        // established client is never timed out for being idle. No attacker is
+        // present on this path, so shut down *gracefully* (via the runtime) so
+        // the keystore's key is zeroized on Drop, rather than hard-exiting.
         if idle_timeout > 0
             && !connected.load(Ordering::Relaxed)
             && now.saturating_duration_since(start).as_secs() >= idle_timeout
         {
-            exit(
-                socket_path,
-                0,
-                "no client connected before the idle timeout",
-            );
+            idle_shutdown.notify_one();
+            return;
         }
     }
 }

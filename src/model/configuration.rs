@@ -13,6 +13,9 @@ pub enum AssetType {
     Fiat,
     /// A crypto asset such as BTC or ETH.
     Crypto,
+    /// A value this SDK version does not recognize (forward compatibility).
+    #[serde(other)]
+    Unknown,
 }
 
 /// Whether a currency or trading pair is currently tradable.
@@ -23,6 +26,9 @@ pub enum ListingStatus {
     Active,
     /// Not currently available.
     Inactive,
+    /// A value this SDK version does not recognize (forward compatibility).
+    #[serde(other)]
+    Unknown,
 }
 
 /// A supported currency.

@@ -52,6 +52,12 @@ const MAX_REQUEST_FRAME: u32 = 64 * 1024;
 /// well under this; it is a defensive ceiling, not an expected size.
 const MAX_RESPONSE_FRAME: u32 = 1024 * 1024;
 
+/// Once a frame's length prefix has been read, the rest of the frame must arrive
+/// within this window. A stalled partial frame must not pin a connection (and
+/// the agent's unlocked vault) open. The length prefix itself is *not* timed: a
+/// healthy idle client legitimately sends nothing between requests.
+const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A request sent from a client to the agent.
 #[derive(Debug, Encode, Decode)]
 pub enum AgentRequest {
@@ -110,13 +116,21 @@ pub struct WireResponse {
     body: Vec<u8>,
 }
 
-/// The default socket path: `$XDG_RUNTIME_DIR/revolutx-agent.sock`, falling back
-/// to the system temp directory when `XDG_RUNTIME_DIR` is unset.
+/// The default socket path: `$XDG_RUNTIME_DIR/revolutx-agent.sock`.
+///
+/// When `XDG_RUNTIME_DIR` is unset, falls back to a `revolutx-agent`
+/// subdirectory of the system temp dir — the daemon creates that subdirectory
+/// `0700`, so the socket is private even when the temp dir itself is shared.
 #[must_use]
 pub fn default_socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map_or_else(std::env::temp_dir, PathBuf::from)
-        .join("revolutx-agent.sock")
+    std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
+        || {
+            std::env::temp_dir()
+                .join("revolutx-agent")
+                .join("agent.sock")
+        },
+        |dir| PathBuf::from(dir).join("revolutx-agent.sock"),
+    )
 }
 
 // --- framing ---------------------------------------------------------------
@@ -134,6 +148,7 @@ async fn write_frame<T: Encode + Sync>(stream: &mut UnixStream, value: &T) -> st
 }
 
 async fn read_frame_bytes(reader: &mut UnixStream, max_len: u32) -> std::io::Result<Vec<u8>> {
+    // Untimed: between requests an idle client legitimately sends nothing.
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf);
@@ -144,7 +159,10 @@ async fn read_frame_bytes(reader: &mut UnixStream, max_len: u32) -> std::io::Res
         ));
     }
     let mut buf = vec![0u8; len as usize];
-    reader.read_exact(&mut buf).await?;
+    // Timed: a started frame whose body stalls must not hold the connection open.
+    tokio::time::timeout(FRAME_BODY_TIMEOUT, reader.read_exact(&mut buf))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "frame body timed out"))??;
     Ok(buf)
 }
 
@@ -333,10 +351,44 @@ async fn bind(socket_path: &Path) -> Result<UnixListener> {
             .map_err(|e| Error::agent(format!("could not remove stale socket: {e}")))?;
     }
 
+    // Keep the socket's parent directory private (0700). This protects the brief
+    // window between `bind` (which creates the socket honoring the ambient umask,
+    // possibly group/other-readable) and the chmod below: a 0700 parent means no
+    // other user can reach the socket during that window. `$XDG_RUNTIME_DIR` is
+    // already 0700; this also covers the temp-dir fallback's private subdir.
+    ensure_private_parent(socket_path)?;
     let listener = UnixListener::bind(socket_path)
         .map_err(|e| Error::agent(format!("could not bind {}: {e}", socket_path.display())))?;
     set_socket_permissions(socket_path)?;
     Ok(listener)
+}
+
+#[cfg(unix)]
+fn ensure_private_parent(socket_path: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let Some(parent) = socket_path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    if !parent.exists() {
+        // We are creating it, so make it private from the start (mode honors the
+        // umask, hence the explicit set_permissions belt below).
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(|e| Error::agent(format!("could not create {}: {e}", parent.display())))?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| Error::agent(format!("could not secure {}: {e}", parent.display())))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_parent(_socket_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]

@@ -43,7 +43,9 @@ pub enum ConfigError {
 /// Construct from CLI flags, then call [`ClientConfig::or_env`] to fill any
 /// unset field from the environment, or use [`ClientConfig::from_env`] /
 /// [`client_from_env`] to read everything from the environment.
-#[derive(Debug, Default, Clone)]
+///
+/// `Debug` redacts the API key and private key — they must never reach logs.
+#[derive(Default, Clone)]
 pub struct ClientConfig {
     /// Target environment (defaults to [`Environment::Production`] when unset).
     pub environment: Option<Environment>,
@@ -53,6 +55,25 @@ pub struct ClientConfig {
     pub private_key_pem: Option<String>,
     /// Path to a private key PEM file.
     pub private_key_path: Option<String>,
+}
+
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Show only whether each secret is present, never its value.
+        let redact = |v: &Option<String>| {
+            if v.is_some() {
+                "Some(<redacted>)"
+            } else {
+                "None"
+            }
+        };
+        f.debug_struct("ClientConfig")
+            .field("environment", &self.environment)
+            .field("api_key", &redact(&self.api_key))
+            .field("private_key_pem", &redact(&self.private_key_pem))
+            .field("private_key_path", &self.private_key_path)
+            .finish()
+    }
 }
 
 impl ClientConfig {

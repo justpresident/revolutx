@@ -266,7 +266,7 @@ impl std::fmt::Display for ApiErrorKind {
 
 /// The wire shape of a Revolut X error payload (`ErrorResponse` schema).
 #[cfg(feature = "rest")]
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Default)]
 struct ErrorPayload {
     #[serde(default)]
     message: Option<String>,
@@ -302,23 +302,34 @@ pub(crate) fn classify_error_response(
     retry_after: Option<Duration>,
     body: &[u8],
 ) -> Error {
-    match serde_json::from_slice::<ErrorPayload>(body) {
-        Ok(payload) if payload.message.is_some() || payload.error_id.is_some() => {
-            Error::Api(ApiError {
-                status,
-                kind: ApiErrorKind::from_status(status),
-                message: payload
-                    .message
-                    .unwrap_or_else(|| reason_phrase(status).to_owned()),
-                error_id: payload.error_id,
-                timestamp: payload.timestamp,
-                retry_after,
-            })
-        }
-        _ => Error::Unexpected {
+    let payload = serde_json::from_slice::<ErrorPayload>(body).unwrap_or_default();
+    let kind = ApiErrorKind::from_status(status);
+
+    // Classify as a structured API error when the body looks like one OR the
+    // status is a recognized API error code. The latter is important: a 429/401
+    // whose body doesn't match `ErrorPayload` must still be recognizable as
+    // rate-limited/unauthorized (and must keep its `Retry-After`), so a bot's
+    // backoff and auth-recovery logic still fires. Only a genuinely unclassified
+    // status with an unstructured body falls through to `Unexpected`.
+    if payload.message.is_some()
+        || payload.error_id.is_some()
+        || !matches!(kind, ApiErrorKind::Other)
+    {
+        Error::Api(ApiError {
+            status,
+            kind,
+            message: payload
+                .message
+                .unwrap_or_else(|| reason_phrase(status).to_owned()),
+            error_id: payload.error_id,
+            timestamp: payload.timestamp,
+            retry_after,
+        })
+    } else {
+        Error::Unexpected {
             status,
             body: truncate_body(&String::from_utf8_lossy(body)),
-        },
+        }
     }
 }
 
@@ -387,10 +398,29 @@ mod tests {
     }
 
     #[test]
-    fn non_json_body_becomes_unexpected() {
+    fn known_status_classifies_even_without_a_structured_body() {
+        // A recognized status (here 429) must still be recognized as
+        // rate-limited and keep its Retry-After even when the body isn't the
+        // expected JSON shape — a bot's backoff logic depends on it.
+        let err =
+            classify_error_response(429, Some(Duration::from_secs(5)), b"<html>slow down</html>");
+        assert!(err.is_rate_limited());
+        assert_eq!(err.status(), Some(429));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
+
+        // A 5xx with an HTML body classifies as a Server API error, not Unexpected.
         let err = classify_error_response(502, None, b"<html>bad gateway</html>");
-        assert!(matches!(err, Error::Unexpected { status: 502, .. }));
-        assert_eq!(err.status(), Some(502));
+        assert_eq!(
+            err.api_error().map(|api| api.kind),
+            Some(ApiErrorKind::Server)
+        );
+    }
+
+    #[test]
+    fn unknown_status_with_unstructured_body_is_unexpected() {
+        let err = classify_error_response(418, None, b"i am a teapot");
+        assert!(matches!(err, Error::Unexpected { status: 418, .. }));
+        assert_eq!(err.status(), Some(418));
         assert!(err.api_error().is_none());
     }
 }

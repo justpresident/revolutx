@@ -82,6 +82,20 @@ impl Server {
             }
         };
 
+        // Reject anything that isn't a single JSON-RPC request object (arrays /
+        // batches, scalars) with an error rather than silently dropping it, which
+        // would hang a client waiting for a response.
+        if !value.is_object() {
+            return Some(
+                error(
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "expected a single JSON-RPC request object",
+                )
+                .to_string(),
+            );
+        }
+
         // A request has an `id`; a notification does not.
         let id = value.get("id").cloned();
         let method = value.get("method").and_then(Value::as_str);

@@ -20,5 +20,5 @@ clap = { version = "4", features = ["derive"] }
 rpassword = "7"
 serde = "1"
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "net", "time", "signal", "macros"] }
+tokio = { version = "1", features = ["rt", "net", "time", "signal", "macros", "sync"] }
 zeroize = "1"
