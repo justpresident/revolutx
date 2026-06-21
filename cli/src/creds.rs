@@ -80,11 +80,7 @@ pub fn client(global: &GlobalOpts, needs_auth: bool) -> Res<RevolutXClient> {
 /// Runs a `vault` subcommand (synchronous — no network).
 pub fn run_vault(global: &GlobalOpts, command: &VaultCmd) -> Res<()> {
     match command {
-        VaultCmd::Init {
-            key_file,
-            generate,
-            api_key,
-        } => {
+        VaultCmd::Init { key_file, generate } => {
             let path = vault_path(global);
             if path.exists() {
                 return Err(format!("a vault already exists at {}", path.display()).into());
@@ -104,10 +100,9 @@ pub fn run_vault(global: &GlobalOpts, command: &VaultCmd) -> Res<()> {
                 return Err("provide --key-file <pem> or --generate".into());
             };
 
-            let mut api_key = match api_key {
-                Some(key) => key.clone(),
-                None => rpassword::prompt_password("API key: ")?,
-            };
+            // The API key is a secret: read it via a hidden prompt (never a flag,
+            // which would leak it into argv / shell history).
+            let mut api_key = rpassword::prompt_password("API key: ")?;
             let mut password = rpassword::prompt_password("New master password: ")?;
             let mut confirm = rpassword::prompt_password("Confirm master password: ")?;
             if password != confirm {

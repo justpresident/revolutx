@@ -127,9 +127,6 @@ pub enum VaultCmd {
         /// with Revolut X.
         #[arg(long)]
         generate: bool,
-        /// API key (prompted, hidden, if omitted).
-        #[arg(long)]
-        api_key: Option<String>,
     },
 }
 
