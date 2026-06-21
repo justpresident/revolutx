@@ -37,7 +37,7 @@ async fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    let server = match Server::from_env() {
+    let server = match Server::from_env().await {
         Ok(server) => server,
         Err(e) => {
             eprintln!("revolutx-mcp: configuration error: {e}");
