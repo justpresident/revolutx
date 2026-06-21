@@ -12,11 +12,16 @@ cargo install revolutx-cli
 
 By default, authenticated commands read credentials from an **encrypted vault**
 (rcypher: Argon2id + AES-256-CBC + HMAC), unlocked with a master password. Create
-one from an Ed25519 key (see the SDK README for `openssl genpkey`):
+one by generating a fresh key pair, or by importing an existing Ed25519 PEM:
 
 ```sh
-revolutx vault init --key-file private.pem      # prompts for API key + master password
+revolutx vault init --generate                  # new key pair; prints the public key to register
+revolutx vault init --key-file private.pem      # import an existing key
 ```
+
+With `--generate`, the private key goes straight into the vault — it never
+touches the disk unencrypted — and the public key is printed for you to register
+with Revolut X. Both forms prompt for the API key and a master password.
 
 Then run commands — you'll be prompted for the master password when needed:
 
@@ -26,6 +31,7 @@ revolutx market public-order-book BTC-USD       # public, no credentials
 revolutx market order-book BTC-USD --limit 10
 revolutx orders active
 revolutx orders limit buy BTC-USD 0.001 50000 --post-only --yes   # REAL TRADING
+revolutx orders replace <ID> --price 49000 --yes                  # atomic amend (size and/or price)
 revolutx --json market tickers                  # machine-readable output
 ```
 

@@ -114,12 +114,19 @@ pub enum AgentCmd {
 
 #[derive(Subcommand)]
 pub enum VaultCmd {
-    /// Create a new encrypted vault from an API key and an Ed25519 PEM key.
+    /// Create a new encrypted vault. Supply a key with exactly one of
+    /// `--key-file` (import) or `--generate` (create a fresh key pair).
+    #[command(group(clap::ArgGroup::new("key_source").required(true).args(["key_file", "generate"])))]
     Init {
-        /// Path to an existing Ed25519 private key PEM (e.g. from
+        /// Import an existing Ed25519 private key PEM (e.g. from
         /// `openssl genpkey -algorithm ed25519 -out private.pem`).
         #[arg(long)]
-        key_file: PathBuf,
+        key_file: Option<PathBuf>,
+        /// Generate a fresh Ed25519 key pair; the private key goes straight into
+        /// the vault (never to disk) and the public key is printed to register
+        /// with Revolut X.
+        #[arg(long)]
+        generate: bool,
         /// API key (prompted, hidden, if omitted).
         #[arg(long)]
         api_key: Option<String>,
@@ -216,6 +223,26 @@ pub enum OrderCmd {
         /// Interpret `size` as the quote currency amount.
         #[arg(long)]
         quote: bool,
+        /// Confirm the (real) trade.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Atomically replace a resting order (new size and/or price). REAL TRADING
+    /// — requires --yes.
+    Replace {
+        id: String,
+        /// New size (base currency, or quote with --quote).
+        #[arg(long)]
+        size: Option<String>,
+        /// New limit price.
+        #[arg(long)]
+        price: Option<String>,
+        /// Interpret `--size` as the quote currency amount.
+        #[arg(long)]
+        quote: bool,
+        /// Reject if the replacement would take liquidity.
+        #[arg(long)]
+        post_only: bool,
         /// Confirm the (real) trade.
         #[arg(long)]
         yes: bool,

@@ -32,7 +32,7 @@ rest = ["dep:reqwest", "dep:ed25519-dalek", "dep:base64", "dep:zeroize"]
 # feature/module layout is in place. See the `fix` backlog task.
 fix = []
 # Encrypted credential vault (rcypher) exposed as a `Signer`. Implies `rest`.
-keystore = ["rest", "dep:rcypher", "dep:bincode", "zeroize/derive"]
+keystore = ["rest", "dep:rcypher", "dep:bincode", "dep:getrandom", "zeroize/derive"]
 # Signing-agent proxy (unix-only): a `serve()` daemon loop that owns the keystore
 # and does all signing + HTTP, plus a client-side `AgentExecutor` that forwards
 # `RequestSpec`s over a unix socket. Neither the private key nor the API key ever
@@ -54,6 +54,8 @@ base64 = { version = "0.22", optional = true }
 zeroize = { version = "1", optional = true }
 rcypher = { version = "0.2", default-features = false, optional = true }
 bincode = { version = "2", optional = true }
+# OS randomness for `keystore`'s key-pair generation.
+getrandom = { version = "0.3", optional = true }
 # Agent proxy (enabled by the `agent` feature): unix-socket transport + framing.
 tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "time", "sync"], optional = true }
 

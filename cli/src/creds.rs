@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use revolutx::{ClientConfig, Environment, Keystore, KeystoreOptions, RevolutXClient};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::args::{EnvArg, GlobalOpts, VaultCmd};
 
@@ -80,8 +80,11 @@ pub fn client(global: &GlobalOpts, needs_auth: bool) -> Res<RevolutXClient> {
 /// Runs a `vault` subcommand (synchronous — no network).
 pub fn run_vault(global: &GlobalOpts, command: &VaultCmd) -> Res<()> {
     match command {
-        VaultCmd::Init { key_file, api_key } => {
-            let pem = std::fs::read_to_string(key_file)?;
+        VaultCmd::Init {
+            key_file,
+            generate,
+            api_key,
+        } => {
             let path = vault_path(global);
             if path.exists() {
                 return Err(format!("a vault already exists at {}", path.display()).into());
@@ -89,6 +92,17 @@ pub fn run_vault(global: &GlobalOpts, command: &VaultCmd) -> Res<()> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+
+            // The private key (zeroized on drop) comes either from a generated
+            // key pair or an imported PEM. clap guarantees exactly one source.
+            let (pem, generated_public_pem): (Zeroizing<String>, Option<String>) = if *generate {
+                let pair = revolutx::generate_key_pair()?;
+                (pair.private_pem, Some(pair.public_pem))
+            } else if let Some(key_file) = key_file {
+                (Zeroizing::new(std::fs::read_to_string(key_file)?), None)
+            } else {
+                return Err("provide --key-file <pem> or --generate".into());
+            };
 
             let mut api_key = match api_key {
                 Some(key) => key.clone(),
@@ -103,14 +117,25 @@ pub fn run_vault(global: &GlobalOpts, command: &VaultCmd) -> Res<()> {
                 return Err("passwords do not match".into());
             }
 
-            let result =
-                Keystore::create_with(&path, &password, &api_key, &pem, &keystore_options(global));
+            let result = Keystore::create_with(
+                &path,
+                &password,
+                &api_key,
+                pem.as_str(),
+                &keystore_options(global),
+            );
             password.zeroize();
             confirm.zeroize();
             api_key.zeroize();
             result?;
 
             println!("Vault created at {}", path.display());
+            if let Some(public_pem) = generated_public_pem {
+                println!(
+                    "\nGenerated a new Ed25519 key pair. Register this public key with Revolut X:\n"
+                );
+                print!("{public_pem}");
+            }
             Ok(())
         }
     }

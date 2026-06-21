@@ -34,6 +34,46 @@ pub use rcypher::{
     Argon2Params, disable_core_dumps, enable_ptrace_protection, is_debugger_attached,
 };
 
+/// A freshly generated Ed25519 key pair, PEM-encoded, from [`generate_key_pair`].
+pub struct GeneratedKeyPair {
+    /// PKCS#8 private key PEM. Store this in the vault; it is zeroized on drop.
+    pub private_pem: Zeroizing<String>,
+    /// SPKI public key PEM. Not secret — register this with Revolut X.
+    pub public_pem: String,
+}
+
+/// Generates a new Ed25519 key pair from operating-system randomness.
+///
+/// The private key is returned as PKCS#8 PEM (the same format
+/// [`Keystore::create`] and the SDK consume) and never touches the disk
+/// unencrypted; the public key is returned as SPKI PEM to register with the
+/// exchange.
+pub fn generate_key_pair() -> std::result::Result<GeneratedKeyPair, KeystoreError> {
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use ed25519_dalek::pkcs8::spki::EncodePublicKey;
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+
+    // An Ed25519 signing key is a 32-byte seed; fresh OS randomness is a key.
+    let mut seed = Zeroizing::new([0u8; 32]);
+    getrandom::fill(seed.as_mut_slice())
+        .map_err(|e| KeystoreError::Crypto(format!("could not read OS randomness: {e}")))?;
+    let signing = SigningKey::from_bytes(&seed);
+
+    let private_pem = signing
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|e| KeystoreError::Crypto(format!("could not encode private key: {e}")))?;
+    let public_pem = signing
+        .verifying_key()
+        .to_public_key_pem(LineEnding::LF)
+        .map_err(|e| KeystoreError::Crypto(format!("could not encode public key: {e}")))?;
+
+    Ok(GeneratedKeyPair {
+        private_pem,
+        public_pem,
+    })
+}
+
 /// The secrets stored in the vault. Serialized with bincode (compact binary,
 /// no text-escaping of the PEM) and zeroized on drop.
 #[derive(Encode, Decode, Zeroize, ZeroizeOnDrop)]
@@ -229,6 +269,48 @@ mod tests {
 
         assert_eq!(auth.api_key.as_str(), "api-key");
         assert_eq!(auth.signature, GET_BALANCES_SIG);
+    }
+
+    #[test]
+    fn generated_key_pair_round_trips_through_a_vault() {
+        let generated = generate_key_pair().unwrap();
+        assert!(
+            generated
+                .private_pem
+                .starts_with("-----BEGIN PRIVATE KEY-----")
+        );
+        assert!(
+            generated
+                .public_pem
+                .starts_with("-----BEGIN PUBLIC KEY-----")
+        );
+
+        // The generated private key must drive a vault like an imported one: it
+        // parses, and signing produces a stable signature for a fixed message.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.rcx");
+        Keystore::create_with(
+            &path,
+            "pw",
+            "api-key",
+            &generated.private_pem,
+            &test_options(),
+        )
+        .unwrap();
+        let keystore = Keystore::open_with(&path, "pw", &test_options()).unwrap();
+        let message = signing_message(1_700_000_000_000, "GET", "/api/1.0/balances", "", b"");
+        let auth = keystore.authenticate(&message).unwrap();
+        assert_eq!(auth.api_key.as_str(), "api-key");
+        // A non-empty, base64-ish signature (64-byte Ed25519 sig -> 88 chars).
+        assert_eq!(auth.signature.len(), 88);
+    }
+
+    #[test]
+    fn two_generated_key_pairs_differ() {
+        let a = generate_key_pair().unwrap();
+        let b = generate_key_pair().unwrap();
+        assert_ne!(*a.private_pem, *b.private_pem);
+        assert_ne!(a.public_pem, b.public_pem);
     }
 
     #[test]

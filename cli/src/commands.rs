@@ -7,8 +7,8 @@ use revolutx::api::market_data::{CandleInterval, CandlesQuery};
 use revolutx::api::orders::{ActiveOrdersQuery, HistoricalOrdersQuery};
 use revolutx::api::trades::TradesQuery;
 use revolutx::model::market_data::OrderBook;
-use revolutx::model::orders::{Order, OrderAck};
-use revolutx::{Decimal, OrderId, Page, RevolutXClient, Side};
+use revolutx::model::orders::{ExecutionInstruction, Order, OrderAck, OrderReplacementRequest};
+use revolutx::{ClientOrderId, Decimal, OrderId, Page, Price, Quantity, RevolutXClient, Side};
 
 use crate::args::{Command, ConfigCmd, GlobalOpts, MarketCmd, OrderCmd, SideArg, TradeCmd};
 use crate::output;
@@ -226,19 +226,7 @@ async fn orders(global: &GlobalOpts, client: &RevolutXClient, command: OrderCmd)
             yes,
         } => {
             confirm(yes, "place a limit order")?;
-            let size = Decimal::from_str(&size)?;
-            let price = Decimal::from_str(&price)?;
-            let mut builder = match (side_of(side), quote) {
-                (Side::Buy, false) => client.orders().limit_buy(symbol, size, price),
-                (Side::Buy, true) => client.orders().limit_buy_quote(symbol, size, price),
-                (Side::Sell, false) => client.orders().limit_sell(symbol, size, price),
-                (Side::Sell, true) => client.orders().limit_sell_quote(symbol, size, price),
-            };
-            if post_only {
-                builder = builder.post_only();
-            }
-            let ack = builder.send().await?;
-            print_ack(global, &ack)
+            place_limit(global, client, side, symbol, size, price, quote, post_only).await
         }
         OrderCmd::Market {
             side,
@@ -248,15 +236,18 @@ async fn orders(global: &GlobalOpts, client: &RevolutXClient, command: OrderCmd)
             yes,
         } => {
             confirm(yes, "place a market order")?;
-            let size = Decimal::from_str(&size)?;
-            let builder = match (side_of(side), quote) {
-                (Side::Buy, false) => client.orders().market_buy(symbol, size),
-                (Side::Buy, true) => client.orders().market_buy_quote(symbol, size),
-                (Side::Sell, false) => client.orders().market_sell(symbol, size),
-                (Side::Sell, true) => client.orders().market_sell_quote(symbol, size),
-            };
-            let ack = builder.send().await?;
-            print_ack(global, &ack)
+            place_market(global, client, side, symbol, size, quote).await
+        }
+        OrderCmd::Replace {
+            id,
+            size,
+            price,
+            quote,
+            post_only,
+            yes,
+        } => {
+            confirm(yes, "replace an order")?;
+            replace_order(global, client, id, size, price, quote, post_only).await
         }
         OrderCmd::Cancel { id, yes } => {
             confirm(yes, "cancel an order")?;
@@ -271,6 +262,89 @@ async fn orders(global: &GlobalOpts, client: &RevolutXClient, command: OrderCmd)
             Ok(())
         }
     }
+}
+
+// Forwards parsed CLI fields; `side`/`size` are both core order terms.
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
+async fn place_limit(
+    global: &GlobalOpts,
+    client: &RevolutXClient,
+    side: SideArg,
+    symbol: String,
+    size: String,
+    price: String,
+    quote: bool,
+    post_only: bool,
+) -> Res {
+    let size = Decimal::from_str(&size)?;
+    let price = Decimal::from_str(&price)?;
+    let mut builder = match (side_of(side), quote) {
+        (Side::Buy, false) => client.orders().limit_buy(symbol, size, price),
+        (Side::Buy, true) => client.orders().limit_buy_quote(symbol, size, price),
+        (Side::Sell, false) => client.orders().limit_sell(symbol, size, price),
+        (Side::Sell, true) => client.orders().limit_sell_quote(symbol, size, price),
+    };
+    if post_only {
+        builder = builder.post_only();
+    }
+    print_ack(global, &builder.send().await?)
+}
+
+// `side`/`size` are both core order terms.
+#[allow(clippy::similar_names)]
+async fn place_market(
+    global: &GlobalOpts,
+    client: &RevolutXClient,
+    side: SideArg,
+    symbol: String,
+    size: String,
+    quote: bool,
+) -> Res {
+    let size = Decimal::from_str(&size)?;
+    let builder = match (side_of(side), quote) {
+        (Side::Buy, false) => client.orders().market_buy(symbol, size),
+        (Side::Buy, true) => client.orders().market_buy_quote(symbol, size),
+        (Side::Sell, false) => client.orders().market_sell(symbol, size),
+        (Side::Sell, true) => client.orders().market_sell_quote(symbol, size),
+    };
+    print_ack(global, &builder.send().await?)
+}
+
+async fn replace_order(
+    global: &GlobalOpts,
+    client: &RevolutXClient,
+    id: String,
+    size: Option<String>,
+    price: Option<String>,
+    quote: bool,
+    post_only: bool,
+) -> Res {
+    let size = size.map(|s| Decimal::from_str(&s)).transpose()?;
+    let (base_size, quote_size) = match (size, quote) {
+        (Some(amount), false) => (Some(Quantity::new(amount)?), None),
+        (Some(amount), true) => (None, Some(Quantity::new(amount)?)),
+        (None, _) => (None, None),
+    };
+    let price = price
+        .map(|p| Decimal::from_str(&p))
+        .transpose()?
+        .map(Price::new)
+        .transpose()?;
+    if base_size.is_none() && quote_size.is_none() && price.is_none() {
+        return Err("replace needs at least one of --size or --price".into());
+    }
+    let request = OrderReplacementRequest {
+        client_order_id: ClientOrderId::default(),
+        base_size,
+        quote_size,
+        price,
+        execution_instructions: post_only.then(|| vec![ExecutionInstruction::PostOnly]),
+    };
+    let ack = client
+        .orders()
+        .replace(&OrderId::new(&id), &request)
+        .await?;
+    print_ack(global, &ack)
 }
 
 async fn trades(global: &GlobalOpts, client: &RevolutXClient, command: TradeCmd) -> Res {

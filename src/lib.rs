@@ -116,7 +116,7 @@ pub use client::{ClientBuilder, Environment, RevolutXClient};
 pub use config::{ClientConfig, ConfigError, client_from_env};
 pub use error::{ApiError, ApiErrorKind, Error, Result};
 #[cfg(feature = "keystore")]
-pub use keystore::{Keystore, KeystoreError, KeystoreOptions};
+pub use keystore::{GeneratedKeyPair, Keystore, KeystoreError, KeystoreOptions, generate_key_pair};
 pub use model::Page;
 pub use model::common::{ClientOrderId, OrderId, Price, Quantity, Side, Symbol, Timestamp};
 pub use rust_decimal::Decimal;
