@@ -6,32 +6,68 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-22
+
+Adds optional credential-security features — an encrypted keystore and a
+full-proxy signing agent — on top of the REST client, and tightens several
+response-model and error-handling behaviors. This is the `revolutx` version the
+`revolutx-cli` and `revolutx-mcp` binary crates depend on.
+
 ### Added
 
-- Cargo features: `rest` (default) gates the REST client; `fix` is reserved for
-  a future FIX 4.4 client. The REST dependency tree (`reqwest`, Ed25519) is now
-  optional, so a `default-features = false, features = ["fix"]` build drops it.
-  The domain models and error types remain available regardless of features.
-- `Serialize` for the response wrapper types `OrderBook`, `Tickers`,
-  `LastTrades`, and `Page<T>` (they were `Deserialize`-only in 0.1.0), so every
-  response model now round-trips through serde.
+- Cargo features: `rest` (default) gates the REST client; `fix` is reserved for a
+  future FIX 4.4 client. The REST dependency tree (`reqwest`, Ed25519) is now
+  optional, so a `default-features = false, features = ["fix"]` build drops it;
+  the domain models and error types remain available regardless of features.
 - `config` module (`ClientConfig`, `client_from_env`) for building a client from
   CLI flags / `REVOLUTX_*` environment variables, under the `rest` feature.
-- `keystore` feature: an `rcypher`-backed encrypted credential vault
-  (`Keystore`, Argon2id + AES-256-CBC + HMAC) that implements `Signer` by
-  decrypting → signing → zeroizing on **every** request, so credentials are
-  never held decrypted between requests. Re-exports rcypher's process-hardening
-  helpers for the unlocking binary to call. Optional dependency, gated.
+  `ClientConfig`'s `Debug` redacts the API key and private key.
 - Pluggable auth and transport seams: a `Signer` trait (default `Ed25519Signer`,
-  set via `ClientBuilder::signer`) authenticating each request through a single
-  `authenticate()` call (so a decrypting signer needs one decrypt per request),
-  and a `RequestExecutor` trait (default `LocalExecutor`, set via
+  set via `ClientBuilder::signer`) that authenticates each request through a
+  single `authenticate()` call (so a decrypting signer needs one decrypt per
+  request), and a `RequestExecutor` trait (default `LocalExecutor`, set via
   `ClientBuilder::executor` / `RevolutXClient::with_executor`) for custom
-  execution backends (e.g. a signing agent in another process). The `transport`
-  module, `RequestSpec`, and `RawResponse` are now public. `RequestAuth.api_key`
-  is `Zeroizing<String>` and `ed25519-dalek`'s `zeroize` is enabled, so
-  credentials are wiped from
-  memory on drop.
+  execution backends. The `transport` module, `RequestSpec`, and `RawResponse`
+  are now public. `RequestAuth::api_key` is `Zeroizing<String>` and
+  `ed25519-dalek`'s `zeroize` is enabled, so key material is wiped on drop.
+- `keystore` feature: an `rcypher`-backed encrypted credential vault (Argon2id +
+  AES-256-CBC + HMAC). `Keystore` is an in-memory record store —
+  `open`/`open_with` initialize it from a master password (starting an empty
+  vault if the file is absent), `get`/`set` read/write individual records
+  (decrypting transiently and zeroizing the plaintext), and `save` writes the
+  encrypted blob to disk atomically (`0600`). It implements `Signer`, reading the
+  `Keystore::API_KEY` and `PRIVATE_KEY_PEM` records and zeroizing the decrypted
+  contents on every request. `generate_key_pair` (+ `GeneratedKeyPair`) creates a
+  fresh Ed25519 key pair (PKCS#8 private PEM, SPKI public PEM) without touching
+  the disk. rcypher's process-hardening helpers (`disable_core_dumps`,
+  `enable_ptrace_protection`, `is_debugger_attached`) are re-exported for the
+  unlocking binary to call. Optional, gated; implies `rest`.
+- `agent` feature (unix-only): a full-proxy signing agent. `serve()` runs a
+  daemon that owns the keystore and performs all signing **and** HTTP; a
+  client-side `AgentExecutor` (plug into `ClientBuilder::executor`) forwards
+  `RequestSpec`s over a unix socket and receives only response bytes — neither
+  the private key nor the API key crosses the socket. A capabilities handshake
+  reports the agent's base URL and trading policy; the agent serves a single
+  client, refuses the rest, and authoritatively gates order mutations.
+  `default_socket_path` gives the conventional socket location. Optional, gated;
+  implies `rest`.
+- `RawPage<T>` — the raw `{ data, metadata }` pagination envelope the API
+  returns, converted into the flat `Page<T>` at the endpoint boundary.
+- Forward-compatible response enums: `OrderType`, `OrderStatus`, `TimeInForce`,
+  `ExecutionInstruction`, `AssetType`, and `ListingStatus` gain an `Unknown`
+  catch-all (`#[serde(other)]`), so a new server value no longer fails the whole
+  response parse.
+
+### Changed
+
+- `Page<T>` is now a flat domain struct that serializes and deserializes through
+  its own fields (it round-trips); the API's wire envelope is the separate
+  `RawPage<T>`. (In 0.1.0 `Page` was `Deserialize`-only and read the envelope
+  directly.)
+- Error classification: a `4xx`/`5xx` response now maps to a structured
+  `Error::Api` by status code even when the body is not the expected JSON shape,
+  and preserves the parsed `Retry-After`. `is_rate_limited()`, `is_auth_error()`,
+  and `retry_after()` therefore fire on unstructured error bodies too.
 
 ## [0.1.0] - 2026-06-19
 
@@ -56,4 +92,5 @@ Initial release. Licensed under Apache-2.0; MSRV 1.85 (edition 2024).
 - OpenAPI coverage drift guard, spec-backed fixtures, offline mock-HTTP endpoint
   tests, and opt-in read-only live smoke tests.
 
+[0.2.0]: https://github.com/justpresident/revolutx/releases/tag/v0.2.0
 [0.1.0]: https://github.com/justpresident/revolutx/releases/tag/v0.1.0

@@ -15,7 +15,7 @@ name = "revolutx"
 path = "src/main.rs"
 
 [dependencies]
-revolutx = { path = "..", version = "0.1", features = ["rest", "keystore", "agent"] }
+revolutx = { path = "..", version = "0.2", features = ["rest", "keystore", "agent"] }
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
 serde = "1"
