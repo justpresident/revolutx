@@ -9,7 +9,8 @@
 Unofficial Rust SDK for the [Revolut X](https://exchange.revolut.com/) crypto
 exchange REST API.
 
-`revolutx` is a handwritten, domain-oriented SDK aimed at trading bots and
+`revolutx` is a custom implementation of Revolut X API. It is not generated from OpenAPI,
+but designed from scratch to provide clean, domain-oriented SDK aimed at trading bots and
 automation. It models trading concepts — symbols, sides, orders, fills,
 balances, order books, candles, tickers — as Rust types, signs requests
 automatically with Ed25519, and never represents money or quantities as `f64`
