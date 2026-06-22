@@ -215,7 +215,8 @@ cargo test --test live_smoke -- --ignored --nocapture
 
 ## MSRV
 
-Rust 1.85 (edition 2024).
+Rust 1.87 (edition 2024). The `keystore` and `agent` features pull in
+[`rcypher`], which requires 1.87.
 
 ## License
 

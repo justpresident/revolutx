@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- MSRV is **1.87** (the `Cargo.toml` `rust-version`): the `keystore`/`agent`
+  features depend on `rcypher`, which uses `const fn` over `Vec::len` (stable
+  since Rust 1.87). 0.2.0 shipped declaring `1.85` by mistake — it does not build
+  on 1.85 with those features.
+
 ## [0.2.0] - 2026-06-22
 
 Adds optional credential-security features — an encrypted keystore and a
