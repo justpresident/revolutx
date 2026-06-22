@@ -4,6 +4,8 @@ Command-line interface for the [Revolut X](https://exchange.revolut.com/) crypto
 exchange, built on the [`revolutx`](https://crates.io/crates/revolutx) SDK. The
 installed binary is named `revolutx`.
 
+## **NOTE: This project is in active development stage - public API will likely change in next versions**
+
 ```sh
 cargo install revolutx-cli
 ```

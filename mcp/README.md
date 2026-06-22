@@ -9,6 +9,8 @@ clients (Claude Desktop, etc.) over stdio. Built on the
 > disabled by default. You are responsible for your own risk controls and
 > credential security.
 
+## **NOTE: This project is in active development stage - public API will likely change in next versions**
+
 ## Install
 
 ```sh
