@@ -46,45 +46,6 @@ pub use rcypher::{
     Argon2Params, disable_core_dumps, enable_ptrace_protection, is_debugger_attached,
 };
 
-/// A freshly generated Ed25519 key pair, PEM-encoded, from [`generate_key_pair`].
-pub struct GeneratedKeyPair {
-    /// PKCS#8 private key PEM. Store this in the vault; it is zeroized on drop.
-    pub private_pem: Zeroizing<String>,
-    /// SPKI public key PEM. Not secret — register this with Revolut X.
-    pub public_pem: String,
-}
-
-/// Generates a new Ed25519 key pair from operating-system randomness.
-///
-/// The private key is returned as PKCS#8 PEM (the same format the vault and the
-/// SDK consume) and never touches the disk unencrypted; the public key is
-/// returned as SPKI PEM to register with the exchange.
-pub fn generate_key_pair() -> std::result::Result<GeneratedKeyPair, KeystoreError> {
-    use ed25519_dalek::SigningKey;
-    use ed25519_dalek::pkcs8::EncodePrivateKey;
-    use ed25519_dalek::pkcs8::spki::EncodePublicKey;
-    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-
-    // An Ed25519 signing key is a 32-byte seed; fresh OS randomness is a key.
-    let mut seed = Zeroizing::new([0u8; 32]);
-    getrandom::fill(seed.as_mut_slice())
-        .map_err(|e| KeystoreError::Crypto(format!("could not read OS randomness: {e}")))?;
-    let signing = SigningKey::from_bytes(&seed);
-
-    let private_pem = signing
-        .to_pkcs8_pem(LineEnding::LF)
-        .map_err(|e| KeystoreError::Crypto(format!("could not encode private key: {e}")))?;
-    let public_pem = signing
-        .verifying_key()
-        .to_public_key_pem(LineEnding::LF)
-        .map_err(|e| KeystoreError::Crypto(format!("could not encode public key: {e}")))?;
-
-    Ok(GeneratedKeyPair {
-        private_pem,
-        public_pem,
-    })
-}
-
 /// Error creating or using an encrypted vault.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -92,9 +53,6 @@ pub enum KeystoreError {
     /// A store operation (create, read, write, or save) failed.
     #[error("vault store error: {0}")]
     Store(String),
-    /// Key generation failed.
-    #[error("key generation error: {0}")]
-    Crypto(String),
 }
 
 /// An encrypted credential store over rcypher's [`SecretStore`].
@@ -222,6 +180,7 @@ impl std::fmt::Debug for Keystore {
 mod tests {
     use super::*;
     use crate::auth::signing_message;
+    use crate::generate_key_pair;
     use rcypher::LockedContainer;
 
     const TEST_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
@@ -290,14 +249,6 @@ mod tests {
         assert_eq!(auth.api_key.as_str(), "api-key");
         // A non-empty, base64-ish signature (64-byte Ed25519 sig -> 88 chars).
         assert_eq!(auth.signature.len(), 88);
-    }
-
-    #[test]
-    fn two_generated_key_pairs_differ() {
-        let a = generate_key_pair().unwrap();
-        let b = generate_key_pair().unwrap();
-        assert_ne!(*a.private_pem, *b.private_pem);
-        assert_ne!(a.public_pem, b.public_pem);
     }
 
     #[test]

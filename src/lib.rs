@@ -101,6 +101,8 @@ pub mod fix;
 #[cfg(feature = "rest")]
 mod auth;
 #[cfg(feature = "rest")]
+mod keygen;
+#[cfg(feature = "rest")]
 pub mod transport;
 
 #[cfg(feature = "agent")]
@@ -115,8 +117,10 @@ pub use client::{ClientBuilder, Environment, RevolutXClient};
 #[cfg(feature = "rest")]
 pub use config::{ClientConfig, ConfigError, client_from_env};
 pub use error::{ApiError, ApiErrorKind, Error, Result};
+#[cfg(feature = "rest")]
+pub use keygen::{GeneratedKeyPair, generate_key_pair};
 #[cfg(feature = "keystore")]
-pub use keystore::{GeneratedKeyPair, Keystore, KeystoreError, generate_key_pair};
+pub use keystore::{Keystore, KeystoreError};
 pub use model::Page;
 #[cfg(feature = "rest")]
 pub use model::RawPage;

@@ -22,6 +22,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the vault cipher's trace-detection is rcypher's (it allows the hardening
   watchdog and refuses only a foreign debugger), so `--insecure-allow-debugging`
   no longer toggles it.
+- `generate_key_pair` / `GeneratedKeyPair` moved from the `keystore` feature to
+  `rest` (they are pure Ed25519, no rcypher), so generating a signing key no
+  longer pulls the encrypted-vault stack. It now returns `Error::KeyGeneration`.
 
 ### Added
 

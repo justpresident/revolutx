@@ -37,6 +37,14 @@ pub enum Error {
         message: String,
     },
 
+    /// A new key pair could not be generated (OS randomness or PEM encoding
+    /// failed).
+    #[error("key generation error: {message}")]
+    KeyGeneration {
+        /// Description of the generation failure.
+        message: String,
+    },
+
     /// A request signature could not be produced.
     #[error("signing error: {message}")]
     Signing {
