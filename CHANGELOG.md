@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Credential vault adopts rcypher 0.3's `SecretStore` format.** The vault is now
+  rcypher's standard multi-factor store, so the same file can be inspected and
+  managed with the `rcypher` CLI — enrol a FIDO2 security key, change the
+  password, set a multi-factor policy (`pass or key`, `pass and key`, …), or
+  rotate records. Each value is encrypted under the store's data key *inside* the
+  encrypted container ("double" encryption), and the `Keystore` `Signer` decrypts
+  one record per request as before. **No migration:** old-format vaults are not
+  read; re-run `revolutx vault init`.
+- `revolutx-cli` gains a default-on `fido2` feature (`--no-default-features` for
+  hosts without `libudev`/`hidapi`); vault unlock now drives rcypher's interactive
+  multi-factor loop (password and/or security key). `KeystoreOptions` is removed —
+  the vault cipher's trace-detection is rcypher's (it allows the hardening
+  watchdog and refuses only a foreign debugger), so `--insecure-allow-debugging`
+  no longer toggles it.
+
 ### Added
 
 - **Signing-agent peer authentication.** The agent now authenticates the

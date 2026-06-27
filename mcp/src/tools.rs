@@ -537,7 +537,10 @@ mod tests {
     fn catalog_includes_authenticate_reads_and_trading_tools() {
         // The catalog is fixed; the agent gates auth + trading at call time.
         let catalog = list();
-        let names: Vec<&str> = catalog.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = catalog
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert!(names.contains(&"authenticate"));
         assert!(names.contains(&"get_balances"));
         assert!(names.contains(&"get_order_book"));

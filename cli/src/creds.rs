@@ -1,16 +1,27 @@
-//! Credential resolution: build a client from the encrypted vault (prompting
-//! for the master password) or, with `--insecure-env`, from environment
-//! variables. Also implements `vault init`.
+//! Credential resolution: build a client from the encrypted vault (driving
+//! rcypher's interactive multi-factor unlock) or, with `--insecure-env`, from
+//! environment variables. Also implements `vault init`.
+//!
+//! The vault is rcypher's own `SecretStore` format, so it can also be inspected
+//! and managed with the `rcypher` command-line tool — e.g. to enrol a FIDO2
+//! security key, change the password, or rotate the API key.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use revolutx::{ClientConfig, Environment, Keystore, KeystoreOptions, RevolutXClient};
+use rcypher::cli::{
+    NoProgress, confirm_if_weak_password, get_password, prompt_password, prompt_until_unlocked,
+};
+use rcypher::{Argon2Params, LockedContainer, SecretStore};
+use revolutx::{ClientConfig, Environment, Keystore, RevolutXClient};
 use zeroize::Zeroizing;
 
 use crate::args::{EnvArg, GlobalOpts, VaultCmd};
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// The factor name given to the initial password when a vault is created.
+const PRIMARY_FACTOR: &str = "primary";
 
 const fn environment(global: &GlobalOpts) -> Environment {
     match global.env {
@@ -28,15 +39,6 @@ pub fn vault_path(global: &GlobalOpts) -> PathBuf {
         .map_or_else(|| PathBuf::from("."), PathBuf::from)
         .join(".revolutx")
         .join("vault")
-}
-
-fn keystore_options(global: &GlobalOpts) -> KeystoreOptions {
-    KeystoreOptions {
-        // Secure Argon2 always (must match what `vault init` used); only the
-        // anti-debug toggle is exposed.
-        trace_detection: !global.insecure_allow_debugging,
-        ..Default::default()
-    }
 }
 
 /// Builds a client. Public commands (`needs_auth = false`) get a credential-less
@@ -64,14 +66,22 @@ pub fn client(global: &GlobalOpts, needs_auth: bool) -> Res<RevolutXClient> {
         .into());
     }
 
-    // Read the master password (wiped on drop) and unlock the vault.
-    let password = Zeroizing::new(rpassword::prompt_password("Master password: ")?);
-    let keystore = Keystore::open_with(&path, &password, &keystore_options(global))?;
-
+    let keystore = unlock_vault(&path)?;
     Ok(RevolutXClient::builder()
         .environment(env)
         .signer(Arc::new(keystore))
         .build()?)
+}
+
+/// Loads the vault and drives rcypher's interactive unlock loop (prompting for
+/// the password and — when built with the `fido2` feature — a security key, per
+/// the vault's access policy), returning the unlocked [`Keystore`] signer.
+fn unlock_vault(path: &Path) -> Res<Keystore> {
+    let mut locked = LockedContainer::load(path)?;
+    eprintln!("Unlock {}: {}", path.display(), locked.requirement());
+    prompt_until_unlocked(&mut locked, &mut NoProgress)?;
+    let unlocked = locked.unlock::<SecretStore>()?;
+    Ok(Keystore::from_unlocked(unlocked))
 }
 
 /// Runs a `vault` subcommand (synchronous — no network).
@@ -81,50 +91,52 @@ pub fn run_vault(global: &GlobalOpts, command: &VaultCmd) -> Res<()> {
 }
 
 /// One-time vault setup: master password → key pair (generated, or imported with
-/// `--key-file`) → API key → encrypted vault. Every secret is `Zeroizing`, so it
-/// is wiped on any exit, including the early returns below.
+/// `--key-file`) → API key → encrypted `SecretStore`. Every secret is `Zeroizing`,
+/// so it is wiped on any exit, including the early returns below.
 fn init_vault(global: &GlobalOpts, key_file: Option<&Path>) -> Res<()> {
     let path = vault_path(global);
     if path.exists() {
         return Err(format!("a vault already exists at {}", path.display()).into());
     }
     create_private_dir(path.parent())?;
-    let options = keystore_options(global);
 
-    // 1. Set the master password (with confirmation), initialize the store (which
-    //    derives the key), and wipe the password immediately — not needed past here.
-    let password = Zeroizing::new(rpassword::prompt_password("New master password: ")?);
-    let confirm = Zeroizing::new(rpassword::prompt_password("Confirm master password: ")?);
-    if password.as_str() != confirm.as_str() {
-        return Err("passwords do not match".into());
+    // 1. Choose the master password (shows the unrecoverable-password warning and
+    //    confirms it), gated against weak choices, then create the store. The
+    //    password is wiped as soon as the store's key is derived.
+    let password = get_password(&path, true)?;
+    if !confirm_if_weak_password(&password, &[PRIMARY_FACTOR, "revolutx"])? {
+        return Err("vault creation cancelled (weak password not confirmed)".into());
     }
-    drop(confirm);
-    let mut vault = Keystore::open_with(&path, &password, &options)?;
+    let mut keystore = Keystore::create(PRIMARY_FACTOR, &password, &Argon2Params::default())?;
     drop(password);
 
-    // 2. Put the private key into the store, then wipe its plaintext — during the
-    //    API-key step below it lives only encrypted in the vault. Generate a fresh
-    //    pair (default) or import an existing PEM.
+    // 2. Put the private key into the store. Generate a fresh pair (default) or
+    //    import an existing PEM.
     if let Some(key_file) = key_file {
         let pem = Zeroizing::new(std::fs::read_to_string(key_file)?);
-        vault.set(Keystore::PRIVATE_KEY_PEM, &pem)?;
+        keystore.set(Keystore::PRIVATE_KEY_PEM, &pem)?;
     } else {
         let pair = revolutx::generate_key_pair()?;
-        vault.set(Keystore::PRIVATE_KEY_PEM, &pair.private_pem)?;
+        keystore.set(Keystore::PRIVATE_KEY_PEM, &pair.private_pem)?;
         print_onboarding(&pair.public_pem);
     }
 
     // 3. Put the API key into the store — created on the website using the public
     //    key above, then pasted here (hidden input, like a password).
-    let api_key = Zeroizing::new(rpassword::prompt_password("Paste your API key: ")?);
-    vault.set(Keystore::API_KEY, &api_key)?;
+    let api_key = prompt_password("Paste your API key")?;
+    keystore.set(Keystore::API_KEY, &api_key)?;
+    drop(api_key);
 
     // 4. Persist the encrypted vault to disk.
-    vault.save()?;
+    keystore.save(&path)?;
 
     println!(
         "\nVault created at {}. Initialization complete.",
         path.display()
+    );
+    println!(
+        "Tip: add a FIDO2 security key or change the password with the `rcypher` CLI — \
+         the vault is rcypher's standard format."
     );
     Ok(())
 }

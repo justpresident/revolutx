@@ -51,7 +51,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 |---|---|---|
 | `rest` | ✅ | The REST API: Ed25519-signed HTTP client and all endpoint groups (pulls `reqwest` + Ed25519). |
 | `fix` | — | FIX 4.4 client (market data + trading). **Reserved, not yet implemented.** |
-| `keystore` | — | Encrypted credential vault ([`rcypher`]) exposed as a `Signer` (Argon2id + AES-256-CBC + HMAC). Implies `rest`. |
+| `keystore` | — | Encrypted credential vault exposed as a `Signer`, stored in [`rcypher`]'s multi-factor `SecretStore` format (Argon2id + AES-256-CBC + HMAC; password and/or FIDO2; manageable with the `rcypher` CLI). Implies `rest`. |
 | `agent` | — | Signing-agent proxy (unix-only): a `serve()` daemon plus an `AgentExecutor` client, so a headless process can delegate signing + HTTP to an agent that holds the keystore. Implies `rest`. |
 
 [`rcypher`]: https://crates.io/crates/rcypher

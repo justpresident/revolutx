@@ -12,9 +12,11 @@ cargo install revolutx-cli
 
 ## Setup
 
-Authenticated commands read credentials from an **encrypted vault** (rcypher:
-Argon2id + AES-256-CBC + HMAC) at `~/.revolutx/vault`, unlocked with a master
-password. Initialize it once:
+Authenticated commands read credentials from an **encrypted vault** at
+`~/.revolutx/vault`. The vault is [rcypher](https://crates.io/crates/rcypher)'s
+own `SecretStore` format (Argon2id + AES-256-CBC + HMAC, with each value
+encrypted again under the store key), unlocked by a multi-factor policy — a
+master password and/or a FIDO2 security key. Initialize it once:
 
 ```sh
 revolutx vault init
@@ -22,7 +24,7 @@ revolutx vault init
 
 This:
 
-1. prompts for a master password,
+1. prompts for a master password (rejecting weak ones),
 2. generates an Ed25519 key pair (the private key is stored **only** in the
    vault — it never touches the disk unencrypted),
 3. prints the public key with instructions to create your API key at
@@ -32,8 +34,17 @@ This:
 Already have a key pair? `revolutx vault init --key-file private.pem` imports it
 instead of generating one.
 
-Then run commands — you'll be prompted only for the master password to unlock the
-vault:
+Because the vault is rcypher's standard format, you can manage it directly with
+the [`rcypher`](https://crates.io/crates/rcypher) CLI — **enrol a FIDO2 security
+key**, change the password, set a multi-factor policy, or rotate the stored
+records. `revolutx` then unlocks against whatever policy you set.
+
+> FIDO2 unlock is built in by default. On a host without the USB-HID build deps
+> (`libudev`/`hidapi` + `pkg-config`), install `revolutx-cli` with
+> `--no-default-features`; password-only vaults still unlock.
+
+Then run commands — you'll be prompted to unlock the vault (a password, and a
+security-key touch if your policy requires one):
 
 ```sh
 revolutx balances
@@ -88,9 +99,11 @@ agent. Protections:
 ## Safety
 
 - Order placement / cancellation is **real trading** and requires `--yes`.
-- Vault-unlocking commands harden the process (no core dumps; anti-debugger)
-  before doing anything; use `--insecure-allow-debugging` on legitimately-traced
-  hosts (CI, profilers).
+- Vault-unlocking commands harden the process (no core dumps; anti-debugger fork
+  + watchdog) before doing anything; `--insecure-allow-debugging` disables that
+  fork/watchdog. Note that rcypher's vault cipher independently refuses to operate
+  while a *foreign* debugger is attached (it allows the hardening watchdog), so a
+  vault still won't open under an unrelated tracer.
 
 ## License
 

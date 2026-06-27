@@ -31,8 +31,10 @@ rest = ["dep:reqwest", "dep:ed25519-dalek", "dep:base64", "dep:zeroize"]
 # FIX 4.4 client (market data + trading). Not yet implemented; reserved so the
 # feature/module layout is in place. See the `fix` backlog task.
 fix = []
-# Encrypted credential vault (rcypher) exposed as a `Signer`. Implies `rest`.
-keystore = ["rest", "dep:rcypher", "dep:bincode", "dep:getrandom", "zeroize/derive"]
+# Encrypted credential vault exposed as a `Signer`. Stores credentials in
+# rcypher's own `SecretStore` format (the standard format the `rcypher` CLI
+# reads/writes), via its multi-factor container facade. Implies `rest`.
+keystore = ["rest", "dep:rcypher", "dep:getrandom"]
 # Signing-agent proxy (unix-only): a `serve()` daemon loop that owns the keystore
 # and does all signing + HTTP, plus a client-side `AgentExecutor` that forwards
 # `RequestSpec`s over a unix socket. Neither the private key nor the API key ever
@@ -53,7 +55,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "pem", "pkcs8", "zeroize"], optional = true }
 base64 = { version = "0.22", optional = true }
 zeroize = { version = "1", optional = true }
-rcypher = { version = "0.2", default-features = false, optional = true }
+rcypher = { version = "0.3", default-features = false, features = ["storage"], optional = true }
 bincode = { version = "2", optional = true }
 # OS randomness for `keystore`'s key-pair generation.
 getrandom = { version = "0.3", optional = true }
