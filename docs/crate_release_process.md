@@ -1,8 +1,8 @@
 # Crate release process
 
-Publishing a new `revolutx` release to crates.io. Examples below use `v0.2.0`
+Publishing a new `revolutx` release to crates.io. Examples below use `v0.3.0`
 as the new release tag — substitute the real versions. Get the previous tag with
-`git describe --tags --abbrev=0` (the last published release is `v0.1.0`).
+`git describe --tags --abbrev=0` (the last published release is `v0.2.0`).
 
 crates.io versions are **immutable**: once `cargo publish` succeeds you cannot
 overwrite or re-upload that version (you can only *yank* it). Everything below
@@ -31,22 +31,33 @@ their version requirements — see
 
 ## Review what's shipping
 
-1. Check what has changed since the last release: `git log v0.1.0..HEAD`
+1. Check what has changed since the last release: `git log v0.2.0..HEAD`
    (substitute the actual previous tag).
-2. Check the files that changed: `git diff v0.1.0..HEAD --name-status`.
+2. Check the files that changed: `git diff v0.2.0..HEAD --name-status`.
 3. Read the changed Rust files in full and make sure:
    - a) all doc comments and code comments are correct and precise;
    - b) every public item is documented and the docs match the real API;
    - c) `docs/openapi-inventory.md` and `tests/spec_coverage.rs` still match the
      spec (the coverage test fails if they drift).
-4. **Look for opportunities to improve the code** — abstractions that can be
+4. **Groom the user-facing docs and examples** so they reflect this release:
+   - a) the root `README.md` (and `cli/README.md`, `mcp/README.md`) cover **all**
+     current functionality — every Cargo feature, every endpoint group, and any
+     capability shipped since the last release — with nothing stale;
+   - b) bump the version references to the version you're releasing: the
+     `revolutx = "X.Y"` install snippets and the MSRV note in `README.md`. The
+     `cargo build` gate in [Validate](#validate) catches code that stops
+     compiling, but **not** a doc that still advertises an old version;
+   - c) the runnable examples in `examples/` exercise the current API, and a new
+     public capability worth showing has an example (they must also compile —
+     `cargo build --examples`, run below).
+5. **Look for opportunities to improve the code** — abstractions that can be
    simplified, code that can be made more readable, duplication that can be
    removed. THIS IS REALLY IMPORTANT. Ask a human if you have ideas you are not
    certain about. Commit and re-test any changes you make here before continuing.
 
 ## Validate
 
-5. Make the full gate pass cleanly (and commit any fixes). These mirror CI; the
+6. Make the full gate pass cleanly (and commit any fixes). These mirror CI; the
    `--workspace` flags matter because the binary crates (`revolutx-cli`,
    `revolutx-mcp`) live here too and must build/lint/test as well:
    ```bash
@@ -70,29 +81,29 @@ their version requirements — see
 
 ## Update the changelog
 
-6. Update `CHANGELOG.md` at the repo root ([Keep a Changelog](https://keepachangelog.com/)
+7. Update `CHANGELOG.md` at the repo root ([Keep a Changelog](https://keepachangelog.com/)
    format). From the `git log` review above, turn the `[Unreleased]` section into
    a dated version section, grouping notable changes under
    `Added` / `Changed` / `Fixed` / `Removed`. Keep it human-readable — summarize
    what users care about, not raw commit subjects. This section is the single
    source of truth for the GitHub release notes in the last step.
    ```markdown
-   ## [0.2.0] - 2026-06-22
-   ### Added
-   - Encrypted credential keystore (`keystore` feature) and signing agent
-     (`agent` feature); …
+   ## [0.3.0] - 2026-07-01
+   ### Changed
+   - Credential vault moved to rcypher 0.3's `SecretStore` format (multi-factor;
+     FIDO2); …
    ```
    (`CHANGELOG.md` ships in the published crate — `exclude` only drops the
    submodule, dev-only files, and the two submodule-dependent test files.)
 
 ## Bump and verify the artifact
 
-7. Decide the new version from the review above (pre-1.0 semver: breaking changes
+8. Decide the new version from the review above (pre-1.0 semver: breaking changes
    bump the **minor**, features/fixes bump the **patch**). Set `version` in the
    root `Cargo.toml` (the `revolutx` crate), then run `cargo build` so
    `Cargo.lock` picks up the new `revolutx` version. Then check the dependent
    crates — see [Workspace dependencies](#workspace-dependencies) below.
-8. Commit the bump and changelog first (so the tree is clean), then verify the
+9. Commit the bump and changelog first (so the tree is clean), then verify the
    package without `--allow-dirty` (which would validate a tarball containing
    uncommitted changes you'll never tag):
    ```bash
@@ -109,7 +120,7 @@ The crates in this workspace depend on `revolutx` by **both** `path` and
 `version` — e.g. `revolutx-mcp` has:
 
 ```toml
-revolutx = { path = "..", version = "0.1", features = ["rest", "agent"] }
+revolutx = { path = "..", version = "0.2", features = ["rest", "agent"] }
 ```
 
 The `path` is only used for local/workspace builds; the **`version` requirement
@@ -121,46 +132,47 @@ themselves:
 1. Decide whether the dependent relies on anything introduced in *this* release.
 2. If it does, bump that crate's `revolutx` `version` requirement to the version
    you're releasing, and publish the dependent **after** `revolutx` is live
-   (dependency before dependents). A requirement that's too loose (e.g. `"0.1"`)
-   would let the *published* dependent resolve against an older `revolutx` it
-   cannot actually compile against — a broken `cargo install`.
+   (dependency before dependents). A requirement that's too loose (e.g. `"0.2"`
+   when the dependent now needs `0.3` APIs) would let the *published* dependent
+   resolve against an older `revolutx` it cannot actually compile against — a
+   broken `cargo install`.
 3. If it doesn't, leave the requirement, but confirm it still resolves.
 
 The next `revolutx` version is **not predetermined** — it might be a patch
-(`0.1.1`) or a minor (`0.2.0`) depending on what's shipping — so bump the
+(`0.2.1`) or a minor (`0.3.0`) depending on what's shipping — so bump the
 dependents to whatever you actually choose here, never an assumed number.
 
-> **Current example:** both binary crates depend on `revolutx` features added
-> *after* 0.1.0 — `revolutx-cli` needs `keystore` + `agent`, and `revolutx-mcp`
-> needs `agent`. The published 0.1.0 has only the default `rest` feature, so a
-> `"0.1"` requirement would let a published dependent resolve against a
-> `revolutx` that cannot compile it (a broken `cargo install`). Neither can be
-> published until the next `revolutx` release that ships those features, and at
-> that point each one's `version` requirement must be bumped from `"0.1"` to that
-> release (whatever it turns out to be).
+> **Current example:** both binary crates pin `revolutx = "0.2"`, but on `master`
+> they already build on `revolutx` APIs introduced *after* 0.2.0 — `revolutx-cli`
+> on the rcypher-0.3 `SecretStore` keystore, `revolutx-mcp` on the agent's auth
+> handshake. So the next `revolutx` release that ships those APIs (a 0.3.0)
+> requires bumping each binary's `version` requirement from `"0.2"` to that
+> release before it can be published; a stale `"0.2"` requirement would let a
+> published binary resolve against a `revolutx` that cannot compile it (a broken
+> `cargo install`).
 
 ## Commit, tag, push
 
-9. Commit the bump and changelog as the release commit:
+10. Commit the bump and changelog as the release commit:
    ```bash
    git add Cargo.toml Cargo.lock CHANGELOG.md
    git commit -F- <<'MSG'
-   Release v0.2.0
+   Release v0.3.0
    MSG
    ```
-10. Tag **that** commit so the tag and the published version agree:
+11. Tag **that** commit so the tag and the published version agree:
     ```bash
-    git tag v0.2.0
+    git tag v0.3.0
     ```
-11. Push the commit and the tag:
+12. Push the commit and the tag:
     ```bash
     git push origin master
-    git push origin v0.2.0
+    git push origin v0.3.0
     ```
 
 ## Publish
 
-12. Publish from the clean, tagged tree:
+13. Publish from the clean, tagged tree:
     ```bash
     cargo publish
     ```
@@ -169,19 +181,19 @@ dependents to whatever you actually choose here, never an assumed number.
 
 ## Create the GitHub release
 
-13. Create a GitHub release for the tag, using the new `CHANGELOG.md` section as
+14. Create a GitHub release for the tag, using the new `CHANGELOG.md` section as
     the notes. Write that section to a **temporary** scratch file at
-    `docs/release-notes-v0.2.0.md` — `docs/` is fine for scratch, but **never
+    `docs/release-notes-v0.3.0.md` — `docs/` is fine for scratch, but **never
     commit it, and delete it as soon as the release exists**. Preferred
     (automated, via the `gh` CLI):
     ```bash
-    gh release create v0.2.0 --title "v0.2.0" --notes-file docs/release-notes-v0.2.0.md
-    rm docs/release-notes-v0.2.0.md   # done with it — remove, don't commit
+    gh release create v0.3.0 --title "v0.3.0" --notes-file docs/release-notes-v0.3.0.md
+    rm docs/release-notes-v0.3.0.md   # done with it — remove, don't commit
     ```
     If you'd rather have GitHub draft the notes from merged commits/PRs instead,
     use `--generate-notes` (no scratch file needed). If `gh` is unavailable or
     unauthenticated, create it manually: GitHub → **Releases** → **Draft a new
-    release** → choose the existing `v0.2.0` tag → paste the changelog section →
+    release** → choose the existing `v0.3.0` tag → paste the changelog section →
     **Publish release**, then delete the scratch file.
 
     There are no binary assets to attach: `revolutx` is a library, and the crate

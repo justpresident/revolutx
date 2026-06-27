@@ -41,7 +41,7 @@ automatically with Ed25519, and never represents money or quantities as `f64`
 
 ```toml
 [dependencies]
-revolutx = "0.1"
+revolutx = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -61,21 +61,31 @@ A FIX-only consumer (e.g. a market maker) can drop the HTTP/TLS dependency tree
 entirely:
 
 ```toml
-revolutx = { version = "0.1", default-features = false, features = ["fix"] }
+revolutx = { version = "0.2", default-features = false, features = ["fix"] }
 ```
 
 ## Generating an API key
 
 Create an Ed25519 key pair and register the public key in the
-[Revolut X web app](https://exchange.revolut.com/):
+[Revolut X web app](https://exchange.revolut.com/). Generate one from the SDK:
+
+```rust,no_run
+let pair = revolutx::generate_key_pair()?;
+println!("{}", pair.public_pem);  // register this public key in the web app
+// Keep pair.private_pem secret — e.g. store it in the encrypted vault (the CLI).
+# Ok::<(), revolutx::Error>(())
+```
+
+…or with `openssl`:
 
 ```sh
 openssl genpkey -algorithm ed25519 -out private.pem
 openssl pkey -in private.pem -pubout -out public.pem
 ```
 
-Keep `private.pem` secret. The SDK loads it via
-[`ClientBuilder::private_key_pem`].
+Keep the private key secret. The SDK loads it via
+[`ClientBuilder::private_key_pem`], or — encrypted at rest — from the vault
+managed by [`revolutx-cli`](cli).
 
 ## Quick start
 
@@ -186,6 +196,7 @@ Runnable examples live in [`examples/`](examples):
 
 ```sh
 cargo run --example market_data -- BTC-USD          # public, no credentials
+cargo run --example generate_keypair                # make an Ed25519 key to register
 REVOLUTX_API_KEY=... cargo run --example get_balances
 ```
 
@@ -194,8 +205,13 @@ REVOLUTX_API_KEY=... cargo run --example get_balances
 
 ## Related crates
 
+- [`revolutx-cli`](cli) — a command-line interface over this SDK: an encrypted
+  credential vault (rcypher `SecretStore`; password and/or FIDO2), every endpoint
+  as a command, and a signing **agent** that holds the keystore so headless
+  clients can delegate signing (`cargo install revolutx-cli`).
 - [`revolutx-mcp`](mcp) — a Model Context Protocol (MCP) server that exposes
-  this SDK to LLM clients such as Claude Desktop (`cargo install revolutx-mcp`).
+  this SDK to LLM clients such as Claude Desktop, talking to the agent over a
+  one-time-token-authenticated socket (`cargo install revolutx-mcp`).
 
 ## Testing
 
