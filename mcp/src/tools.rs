@@ -23,6 +23,27 @@ pub const AUTHENTICATE: &str = "authenticate";
 /// Argument key carrying the one-time token for the [`AUTHENTICATE`] tool.
 pub const ARG_TOKEN: &str = "token";
 
+// Tool names — the single source of truth for each tool's catalog entry
+// (`list`) and its dispatch arm (`call`).
+const GET_BALANCES: &str = "get_balances";
+const GET_CURRENCIES: &str = "get_currencies";
+const GET_PAIRS: &str = "get_pairs";
+const GET_TICKERS: &str = "get_tickers";
+const GET_ORDER_BOOK: &str = "get_order_book";
+const GET_PUBLIC_ORDER_BOOK: &str = "get_public_order_book";
+const GET_CANDLES: &str = "get_candles";
+const GET_LAST_TRADES: &str = "get_last_trades";
+const GET_ALL_TRADES: &str = "get_all_trades";
+const GET_PRIVATE_TRADES: &str = "get_private_trades";
+const GET_ACTIVE_ORDERS: &str = "get_active_orders";
+const GET_HISTORICAL_ORDERS: &str = "get_historical_orders";
+const GET_ORDER: &str = "get_order";
+const GET_ORDER_FILLS: &str = "get_order_fills";
+const PLACE_LIMIT_ORDER: &str = "place_limit_order";
+const PLACE_MARKET_ORDER: &str = "place_market_order";
+const CANCEL_ORDER: &str = "cancel_order";
+const CANCEL_ALL_ORDERS: &str = "cancel_all_orders";
+
 /// Returns the tool definitions exposed via `tools/list`. The catalog is fixed:
 /// the agent enforces authentication and the trading gate at call time.
 // A flat, declarative catalog of tool schemas; splitting it would not aid clarity.
@@ -41,22 +62,22 @@ pub fn list() -> Vec<Value> {
             }),
         ),
         tool(
-            "get_balances",
+            GET_BALANCES,
             "Get all account balances (available, reserved, staked, total) per currency. Requires credentials.",
             json!({ "type": "object", "properties": {}, "required": [] }),
         ),
         tool(
-            "get_currencies",
+            GET_CURRENCIES,
             "Get the exchange's supported currencies and their metadata. Requires credentials.",
             json!({ "type": "object", "properties": {}, "required": [] }),
         ),
         tool(
-            "get_pairs",
+            GET_PAIRS,
             "Get the supported trading pairs and their constraints (step sizes, min/max order size). Requires credentials.",
             json!({ "type": "object", "properties": {}, "required": [] }),
         ),
         tool(
-            "get_tickers",
+            GET_TICKERS,
             "Get best bid/ask/mid and last price for trading pairs. Requires credentials.",
             json!({
                 "type": "object",
@@ -68,7 +89,7 @@ pub fn list() -> Vec<Value> {
             }),
         ),
         tool(
-            "get_order_book",
+            GET_ORDER_BOOK,
             "Get an order book snapshot for a symbol (authenticated endpoint).",
             json!({
                 "type": "object",
@@ -80,12 +101,12 @@ pub fn list() -> Vec<Value> {
             }),
         ),
         tool(
-            "get_public_order_book",
+            GET_PUBLIC_ORDER_BOOK,
             "Get an order book snapshot for a symbol from the public (unauthenticated) endpoint.",
             symbol_schema("Trading pair, e.g. BTC-USD"),
         ),
         tool(
-            "get_candles",
+            GET_CANDLES,
             "Get historical OHLCV candles for a symbol.",
             json!({
                 "type": "object",
@@ -100,22 +121,22 @@ pub fn list() -> Vec<Value> {
             }),
         ),
         tool(
-            "get_last_trades",
+            GET_LAST_TRADES,
             "Get the latest public trades across the exchange (unauthenticated).",
             json!({ "type": "object", "properties": {}, "required": [] }),
         ),
         tool(
-            "get_all_trades",
+            GET_ALL_TRADES,
             "Get public market trade history for a symbol (paginated).",
             trades_schema(),
         ),
         tool(
-            "get_private_trades",
+            GET_PRIVATE_TRADES,
             "Get the account's own executions for a symbol (paginated). Requires credentials.",
             trades_schema(),
         ),
         tool(
-            "get_active_orders",
+            GET_ACTIVE_ORDERS,
             "Get currently active orders (paginated). Requires credentials.",
             json!({
                 "type": "object",
@@ -129,7 +150,7 @@ pub fn list() -> Vec<Value> {
             }),
         ),
         tool(
-            "get_historical_orders",
+            GET_HISTORICAL_ORDERS,
             "Get historical (finished) orders (paginated). Requires credentials.",
             json!({
                 "type": "object",
@@ -144,12 +165,12 @@ pub fn list() -> Vec<Value> {
             }),
         ),
         tool(
-            "get_order",
+            GET_ORDER,
             "Get a single order by its venue order id, including fee details. Requires credentials.",
             order_id_schema(),
         ),
         tool(
-            "get_order_fills",
+            GET_ORDER_FILLS,
             "Get the fills (executions) of an order by its venue order id. Requires credentials.",
             order_id_schema(),
         ),
@@ -158,7 +179,7 @@ pub fn list() -> Vec<Value> {
     // Order-mutating tools are always advertised; the agent refuses them unless
     // it was started with --enable-trading (and refuses everything pre-auth).
     tools.push(tool(
-        "place_limit_order",
+        PLACE_LIMIT_ORDER,
             "Place a limit order. REAL TRADING. Requires credentials and trading enabled.",
             json!({
                 "type": "object",
@@ -176,7 +197,7 @@ pub fn list() -> Vec<Value> {
             }),
         ));
     tools.push(tool(
-            "place_market_order",
+            PLACE_MARKET_ORDER,
             "Place a market order. REAL TRADING. Requires credentials and trading enabled.",
             json!({
                 "type": "object",
@@ -192,12 +213,12 @@ pub fn list() -> Vec<Value> {
             }),
         ));
     tools.push(tool(
-        "cancel_order",
+        CANCEL_ORDER,
         "Cancel a single order by its venue order id. REAL TRADING.",
         order_id_schema(),
     ));
     tools.push(tool(
-        "cancel_all_orders",
+        CANCEL_ALL_ORDERS,
         "Cancel all active orders. REAL TRADING.",
         json!({ "type": "object", "properties": {}, "required": [] }),
     ));
@@ -214,10 +235,10 @@ pub fn list() -> Vec<Value> {
 pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<String, String> {
     match name {
         // --- read-only ------------------------------------------------------
-        "get_balances" => ok_json(&sdk(client.balances().get_all().await)?),
-        "get_currencies" => ok_json(&sdk(client.configuration().currencies().await)?),
-        "get_pairs" => ok_json(&sdk(client.configuration().pairs().await)?),
-        "get_tickers" => {
+        GET_BALANCES => ok_json(&sdk(client.balances().get_all().await)?),
+        GET_CURRENCIES => ok_json(&sdk(client.configuration().currencies().await)?),
+        GET_PAIRS => ok_json(&sdk(client.configuration().pairs().await)?),
+        GET_TICKERS => {
             let symbols = opt_str_vec(args, "symbols");
             let tickers = if symbols.is_empty() {
                 sdk(client.market_data().tickers().await)?
@@ -226,7 +247,7 @@ pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<S
             };
             ok_json(&tickers)
         }
-        "get_order_book" => {
+        GET_ORDER_BOOK => {
             let symbol = req_str(args, "symbol")?;
             let book = match opt_u32(args, "limit") {
                 Some(limit) => sdk(client
@@ -237,11 +258,11 @@ pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<S
             };
             ok_json(&book)
         }
-        "get_public_order_book" => {
+        GET_PUBLIC_ORDER_BOOK => {
             let symbol = req_str(args, "symbol")?;
             ok_json(&sdk(client.market_data().public_order_book(&symbol).await)?)
         }
-        "get_candles" => {
+        GET_CANDLES => {
             let symbol = req_str(args, "symbol")?;
             let query = CandlesQuery {
                 interval: opt_candle_interval(args)?,
@@ -250,22 +271,22 @@ pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<S
             };
             ok_json(&sdk(client.market_data().candles(&symbol, &query).await)?)
         }
-        "get_last_trades" => ok_json(&sdk(client.market_data().last_trades().await)?),
-        "get_all_trades" => {
+        GET_LAST_TRADES => ok_json(&sdk(client.market_data().last_trades().await)?),
+        GET_ALL_TRADES => {
             let symbol = req_str(args, "symbol")?;
             ok_json(&sdk(client
                 .trades()
                 .all(&symbol, &trades_query(args))
                 .await)?)
         }
-        "get_private_trades" => {
+        GET_PRIVATE_TRADES => {
             let symbol = req_str(args, "symbol")?;
             ok_json(&sdk(client
                 .trades()
                 .private(&symbol, &trades_query(args))
                 .await)?)
         }
-        "get_active_orders" => {
+        GET_ACTIVE_ORDERS => {
             let query = ActiveOrdersQuery {
                 symbols: opt_str_vec(args, "symbols"),
                 side: opt_side(args)?,
@@ -275,7 +296,7 @@ pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<S
             };
             ok_json(&sdk(client.orders().active(&query).await)?)
         }
-        "get_historical_orders" => {
+        GET_HISTORICAL_ORDERS => {
             let query = HistoricalOrdersQuery {
                 symbols: opt_str_vec(args, "symbols"),
                 start_date: opt_i64(args, "start_date"),
@@ -286,17 +307,17 @@ pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<S
             };
             ok_json(&sdk(client.orders().historical(&query).await)?)
         }
-        "get_order" => {
+        GET_ORDER => {
             let id = OrderId::new(req_str(args, "order_id")?);
             ok_json(&sdk(client.orders().get(&id).await)?)
         }
-        "get_order_fills" => {
+        GET_ORDER_FILLS => {
             let id = OrderId::new(req_str(args, "order_id")?);
             ok_json(&sdk(client.orders().fills(&id).await)?)
         }
 
         // --- order mutation (gated) ----------------------------------------
-        "place_limit_order" => {
+        PLACE_LIMIT_ORDER => {
             let symbol = req_str(args, "symbol")?;
             let side = req_side(args)?;
             let size = req_decimal(args, "size")?;
@@ -316,7 +337,7 @@ pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<S
             }
             ok_json(&sdk(builder.send().await)?)
         }
-        "place_market_order" => {
+        PLACE_MARKET_ORDER => {
             let symbol = req_str(args, "symbol")?;
             let side = req_side(args)?;
             let size = req_decimal(args, "size")?;
@@ -332,12 +353,12 @@ pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<S
             }
             ok_json(&sdk(builder.send().await)?)
         }
-        "cancel_order" => {
+        CANCEL_ORDER => {
             let id = OrderId::new(req_str(args, "order_id")?);
             sdk(client.orders().cancel(&id).await)?;
             ok_json(&json!({ "status": "cancelled", "order_id": id.as_str() }))
         }
-        "cancel_all_orders" => {
+        CANCEL_ALL_ORDERS => {
             sdk(client.orders().cancel_all().await)?;
             ok_json(&json!({ "status": "all_cancelled" }))
         }
