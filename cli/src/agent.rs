@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use revolutx::agent::{default_socket_path, serve};
+use revolutx::agent::{AuthToken, default_socket_path, serve};
 use tokio::sync::Notify;
 
 use crate::args::{AgentCmd, GlobalOpts};
@@ -25,31 +25,50 @@ use crate::creds;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// Error shown when `agent start` is run without `--auth-token` (the only auth
+/// method today).
+const AUTH_TOKEN_REQUIRED: &str = "pass --auth-token: the agent needs a one-time token to \
+     authenticate its client (it is the only auth method today)";
+
 /// Runs an `agent` subcommand.
 pub fn run(global: &GlobalOpts, command: AgentCmd) -> Res<()> {
     match command {
         AgentCmd::Start {
             socket,
+            auth_token,
             idle_timeout,
             enable_trading,
-        } => start(global, socket, idle_timeout, enable_trading),
+        } => start(global, socket, auth_token, idle_timeout, enable_trading),
     }
 }
 
 fn start(
     global: &GlobalOpts,
     socket: Option<PathBuf>,
+    auth_token: bool,
     idle_timeout: u64,
     enable_trading: bool,
 ) -> Res<()> {
+    // A client can only ever be authenticated with a one-time token, so refuse to
+    // start without one — before touching the vault. (Interactive operator
+    // approval, the future no-token path, is not yet implemented.)
+    if !auth_token {
+        return Err(AUTH_TOKEN_REQUIRED.into());
+    }
     let socket_path = socket.unwrap_or_else(default_socket_path);
+
+    // Generate the one-time token before unlocking the vault, then print it once
+    // for the operator to hand to the client out of band. It is never accepted as
+    // a CLI value (that would expose it via /proc and ps).
+    let token = AuthToken::generate()?;
 
     // Unlock the vault (prompts for the master password) BEFORE building the
     // runtime — the hardening + ptrace fork already happened in `main`.
     let client = creds::client(global, true)?;
     let executor = client.executor();
 
-    // The watchdog stops counting toward the idle timeout once a client connects.
+    // The watchdog stops counting toward the idle timeout once a client
+    // authenticates (on_connect fires on authentication, not on TCP accept).
     let connected = Arc::new(AtomicBool::new(false));
     // The idle timeout shuts down *gracefully* (so the keystore's key zeroizes on
     // Drop); only a debugger/clock anomaly hard-exits immediately.
@@ -69,6 +88,7 @@ fn start(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+    print_token(token.as_str());
     eprintln!(
         "revolutx-agent: listening on {} (trading {})",
         socket_path.display(),
@@ -80,7 +100,7 @@ fn start(
     );
     let result = runtime.block_on(async {
         tokio::select! {
-            served = serve(executor, &socket_path, enable_trading, on_connect) => served.map_err(Into::into),
+            served = serve(executor, &socket_path, enable_trading, token, on_connect) => served.map_err(Into::into),
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("revolutx-agent: shutting down");
                 Ok(())
@@ -96,9 +116,23 @@ fn start(
     result
 }
 
+/// Prints the one-time authentication token prominently to stderr (the
+/// operator's terminal), to be copied out of band to the connecting client.
+fn print_token(token: &str) {
+    eprintln!();
+    eprintln!("revolutx-agent: one-time authentication token — give this to your client:");
+    eprintln!();
+    eprintln!("    {token}");
+    eprintln!();
+    eprintln!(
+        "revolutx-agent: the client must present it before the agent serves any \
+         request; it is single-use."
+    );
+}
+
 /// Spawns the continuous security watchdog (a dedicated thread, ticking every
 /// second). It exits the process on a clock anomaly, an attached debugger, or
-/// the pre-connection idle timeout. No thread is spawned when nothing needs
+/// the pre-authentication idle timeout. No thread is spawned when nothing needs
 /// watching.
 fn spawn_watchdog(
     check_debugger: bool,
@@ -147,7 +181,7 @@ fn watchdog_loop(
             exit(socket_path, 1, "debugger detected");
         }
 
-        // The idle timeout only applies until the first client connects; an
+        // The idle timeout only applies until the first client authenticates; an
         // established client is never timed out for being idle. No attacker is
         // present on this path, so shut down *gracefully* (via the runtime) so
         // the keystore's key is zeroized on Drop, rather than hard-exiting.

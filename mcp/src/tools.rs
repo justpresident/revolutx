@@ -1,9 +1,11 @@
 //! MCP tool definitions and dispatch onto the `revolutx` SDK.
 //!
-//! Read-only tools are always available. Order-mutating tools
-//! (`place_*`, `cancel_*`) are only listed and callable when the connected
-//! signing agent was started with trading enabled (`--enable-trading`); the
-//! agent enforces this regardless of what the MCP believes.
+//! Every tool is forwarded to the signing agent, which is the single
+//! authoritative gate: it refuses all requests until the session has
+//! authenticated (via the `authenticate` tool) and refuses order-mutating
+//! (`place_*`, `cancel_*`) requests unless it was started with trading enabled
+//! (`--enable-trading`). The tool catalog is therefore advertised unconditionally
+//! — the agent, not the MCP, decides what actually runs.
 
 use std::str::FromStr;
 
@@ -14,14 +16,30 @@ use revolutx::{ClientOrderId, Decimal, OrderId, RevolutXClient, Side};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-const TRADING_DISABLED: &str = "trading is disabled on the signing agent; restart it with `revolutx agent start --enable-trading` to allow order placement and cancellation";
+/// Tool name: authenticate the session with the agent's one-time token. The
+/// single source of truth for both the catalog entry and the dispatch in
+/// [`crate::server`].
+pub const AUTHENTICATE: &str = "authenticate";
+/// Argument key carrying the one-time token for the [`AUTHENTICATE`] tool.
+pub const ARG_TOKEN: &str = "token";
 
-/// Returns the tool definitions exposed via `tools/list`, filtered by whether
-/// trading is enabled.
+/// Returns the tool definitions exposed via `tools/list`. The catalog is fixed:
+/// the agent enforces authentication and the trading gate at call time.
 // A flat, declarative catalog of tool schemas; splitting it would not aid clarity.
 #[allow(clippy::too_many_lines)]
-pub fn list(trading_enabled: bool) -> Vec<Value> {
+pub fn list() -> Vec<Value> {
     let mut tools = vec![
+        tool(
+            AUTHENTICATE,
+            "Authenticate this session with the signing agent's one-time token. Call this FIRST: the operator starts the agent with `revolutx agent start --auth-token`, which prints a token to paste here. Until you call it successfully, every other tool fails with \"authenticate first\". The token is single-use.",
+            json!({
+                "type": "object",
+                "properties": {
+                    ARG_TOKEN: { "type": "string", "description": "The one-time token printed by the agent at startup." }
+                },
+                "required": [ARG_TOKEN]
+            }),
+        ),
         tool(
             "get_balances",
             "Get all account balances (available, reserved, staked, total) per currency. Requires credentials.",
@@ -137,9 +155,10 @@ pub fn list(trading_enabled: bool) -> Vec<Value> {
         ),
     ];
 
-    if trading_enabled {
-        tools.push(tool(
-            "place_limit_order",
+    // Order-mutating tools are always advertised; the agent refuses them unless
+    // it was started with --enable-trading (and refuses everything pre-auth).
+    tools.push(tool(
+        "place_limit_order",
             "Place a limit order. REAL TRADING. Requires credentials and trading enabled.",
             json!({
                 "type": "object",
@@ -156,7 +175,7 @@ pub fn list(trading_enabled: bool) -> Vec<Value> {
                 "required": ["symbol", "side", "size", "price"]
             }),
         ));
-        tools.push(tool(
+    tools.push(tool(
             "place_market_order",
             "Place a market order. REAL TRADING. Requires credentials and trading enabled.",
             json!({
@@ -172,31 +191,27 @@ pub fn list(trading_enabled: bool) -> Vec<Value> {
                 "required": ["symbol", "side", "size"]
             }),
         ));
-        tools.push(tool(
-            "cancel_order",
-            "Cancel a single order by its venue order id. REAL TRADING.",
-            order_id_schema(),
-        ));
-        tools.push(tool(
-            "cancel_all_orders",
-            "Cancel all active orders. REAL TRADING.",
-            json!({ "type": "object", "properties": {}, "required": [] }),
-        ));
-    }
+    tools.push(tool(
+        "cancel_order",
+        "Cancel a single order by its venue order id. REAL TRADING.",
+        order_id_schema(),
+    ));
+    tools.push(tool(
+        "cancel_all_orders",
+        "Cancel all active orders. REAL TRADING.",
+        json!({ "type": "object", "properties": {}, "required": [] }),
+    ));
 
     tools
 }
 
 /// Executes a tool call, returning the text payload on success or a
-/// human-readable error message on failure.
+/// human-readable error message on failure. The signing agent enforces both the
+/// authentication gate and the trading gate, so failures (including "authenticate
+/// first" and "trading is disabled") surface here as the agent's error message.
 // A flat dispatch over tool names; `side`/`size` are both core order terms.
 #[allow(clippy::too_many_lines, clippy::similar_names)]
-pub async fn call(
-    client: &RevolutXClient,
-    trading_enabled: bool,
-    name: &str,
-    args: &Value,
-) -> Result<String, String> {
+pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<String, String> {
     match name {
         // --- read-only ------------------------------------------------------
         "get_balances" => ok_json(&sdk(client.balances().get_all().await)?),
@@ -282,9 +297,6 @@ pub async fn call(
 
         // --- order mutation (gated) ----------------------------------------
         "place_limit_order" => {
-            if !trading_enabled {
-                return Err(TRADING_DISABLED.to_string());
-            }
             let symbol = req_str(args, "symbol")?;
             let side = req_side(args)?;
             let size = req_decimal(args, "size")?;
@@ -305,9 +317,6 @@ pub async fn call(
             ok_json(&sdk(builder.send().await)?)
         }
         "place_market_order" => {
-            if !trading_enabled {
-                return Err(TRADING_DISABLED.to_string());
-            }
             let symbol = req_str(args, "symbol")?;
             let side = req_side(args)?;
             let size = req_decimal(args, "size")?;
@@ -324,17 +333,11 @@ pub async fn call(
             ok_json(&sdk(builder.send().await)?)
         }
         "cancel_order" => {
-            if !trading_enabled {
-                return Err(TRADING_DISABLED.to_string());
-            }
             let id = OrderId::new(req_str(args, "order_id")?);
             sdk(client.orders().cancel(&id).await)?;
             ok_json(&json!({ "status": "cancelled", "order_id": id.as_str() }))
         }
         "cancel_all_orders" => {
-            if !trading_enabled {
-                return Err(TRADING_DISABLED.to_string());
-            }
             sdk(client.orders().cancel_all().await)?;
             ok_json(&json!({ "status": "all_cancelled" }))
         }
@@ -510,19 +513,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn read_tools_present_and_trading_tools_gated() {
-        let read = list(false);
-        let names: Vec<&str> = read.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    fn catalog_includes_authenticate_reads_and_trading_tools() {
+        // The catalog is fixed; the agent gates auth + trading at call time.
+        let catalog = list();
+        let names: Vec<&str> = catalog.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"authenticate"));
         assert!(names.contains(&"get_balances"));
         assert!(names.contains(&"get_order_book"));
-        assert!(!names.contains(&"place_limit_order"));
-        assert!(!names.contains(&"cancel_all_orders"));
-
-        let with_trading = list(true);
-        let names: Vec<&str> = with_trading
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
         assert!(names.contains(&"place_limit_order"));
         assert!(names.contains(&"place_market_order"));
         assert!(names.contains(&"cancel_order"));
@@ -531,7 +528,7 @@ mod tests {
 
     #[test]
     fn every_tool_has_an_object_input_schema() {
-        for t in list(true) {
+        for t in list() {
             assert!(t["name"].is_string());
             assert!(t["description"].is_string());
             assert_eq!(t["inputSchema"]["type"], "object", "tool {}", t["name"]);

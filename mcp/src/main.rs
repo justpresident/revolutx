@@ -45,9 +45,8 @@ async fn main() {
         }
     };
     eprintln!(
-        "revolutx-mcp ready (authenticated: {}, trading enabled: {})",
-        server.is_authenticated(),
-        server.trading_enabled()
+        "revolutx-mcp ready (connected to agent; not yet authenticated — call the \
+         `authenticate` tool with the agent's one-time token)"
     );
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();

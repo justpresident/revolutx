@@ -93,15 +93,23 @@ impl Command {
 
 #[derive(Subcommand)]
 pub enum AgentCmd {
-    /// Unlock the vault and serve a single client over a unix socket until it
-    /// disconnects or the process is stopped (Ctrl-C). Runs in the foreground.
+    /// Unlock the vault and serve a single authenticated client over a unix
+    /// socket until it disconnects or the process is stopped (Ctrl-C). Runs in
+    /// the foreground.
     Start {
         /// Unix socket path (default: $`XDG_RUNTIME_DIR/revolutx-agent.sock`).
         #[arg(long)]
         socket: Option<PathBuf>,
-        /// Auto-lock (exit) if no client connects within this many seconds. The
-        /// timeout applies only until the first connection — once a client is
-        /// connected it is never timed out for being idle. 0 disables it.
+        /// Generate a one-time authentication token and print it. The connecting
+        /// client (e.g. the MCP) must present this token before the agent serves
+        /// any request, so another same-UID process cannot use the signing
+        /// oracle. Currently required (the only way to authenticate a client).
+        #[arg(long)]
+        auth_token: bool,
+        /// Auto-lock (exit) if no client authenticates within this many seconds.
+        /// The timeout applies only until the first client authenticates — once a
+        /// client is connected it is never timed out for being idle. 0 disables
+        /// it.
         #[arg(long, default_value_t = 300)]
         idle_timeout: u64,
         /// Allow the connected client to place and cancel orders (REAL TRADING).

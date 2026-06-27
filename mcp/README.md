@@ -36,13 +36,15 @@ The only configuration is a single, optional, non-sensitive variable:
 ### Setup
 
 Create an encrypted vault once, and start the agent (it prompts for the master
-password); the MCP then connects to it:
+password). The agent requires `--auth-token`: it prints a **one-time token** that
+the LLM must present before the agent will serve any request — so another
+process running as your user cannot use the signing oracle.
 
 ```sh
 revolutx vault init                          # one-time: generates a key, guides you to create the API key
-revolutx agent start                         # read-only
+revolutx agent start --auth-token            # read-only; prints the one-time token
 # ...or, to permit order placement/cancellation through the MCP:
-revolutx agent start --enable-trading        # REAL TRADING
+revolutx agent start --auth-token --enable-trading   # REAL TRADING
 ```
 
 ```json
@@ -56,22 +58,38 @@ revolutx agent start --enable-trading        # REAL TRADING
 ```
 
 Add `"env": { "REVOLUTX_AGENT_SOCKET": "/path/to/agent.sock" }` only if the agent
-listens somewhere other than the default. The agent serves a single client and
-exits when it disconnects, so start it alongside the MCP; if the MCP restarts,
-restart the agent too.
+listens somewhere other than the default. The agent serves a single authenticated
+client and exits when it disconnects, so start it alongside the MCP; if the MCP
+restarts, restart the agent too (the token is single-use, so each session needs a
+freshly started agent).
+
+### Authenticating the session
+
+The connection starts **unauthenticated**: every tool except `authenticate`
+returns *"authenticate first"*. Copy the token the agent printed and ask the
+assistant to authenticate, e.g. *"authenticate with token `<paste>`"*. The LLM
+calls the `authenticate` tool; on success the other tools become usable for the
+rest of the session.
 
 **Whether trading is allowed is the agent's decision** (`--enable-trading`), not
 the MCP's — nothing in the MCP's environment can enable it.
 
 ## Tools
 
-Read-only (always available): `get_balances`, `get_currencies`, `get_pairs`,
-`get_tickers`, `get_order_book`, `get_public_order_book`, `get_candles`,
-`get_last_trades`, `get_all_trades`, `get_private_trades`, `get_active_orders`,
+Authentication: `authenticate` (call first, with the agent's one-time token).
+
+Read-only: `get_balances`, `get_currencies`, `get_pairs`, `get_tickers`,
+`get_order_book`, `get_public_order_book`, `get_candles`, `get_last_trades`,
+`get_all_trades`, `get_private_trades`, `get_active_orders`,
 `get_historical_orders`, `get_order`, `get_order_fills`.
 
-Order mutation (only when the agent was started with `--enable-trading`):
-`place_limit_order`, `place_market_order`, `cancel_order`, `cancel_all_orders`.
+Order mutation: `place_limit_order`, `place_market_order`, `cancel_order`,
+`cancel_all_orders` — advertised always, but the agent refuses them unless it was
+started with `--enable-trading`.
+
+Every tool is forwarded to the agent, which is the single authoritative gate: it
+refuses all requests until the session has authenticated and refuses order
+mutations unless trading is enabled.
 
 Tool results are returned as pretty-printed JSON of the corresponding SDK
 response. Decimal values are preserved as strings (never floats).
@@ -80,8 +98,10 @@ response. Decimal values are preserved as strings (never floats).
 
 - The MCP holds **no key material** — the agent does all signing and HTTP, so a
   compromised MCP environment cannot leak credentials.
-- Order-mutating tools are not even listed unless the agent enabled trading, and
-  the agent itself refuses any order request when trading is off — the MCP cannot
+- A one-time token authenticates the connecting peer before the oracle is
+  exposed, so another same-UID process that races to the socket cannot trade as
+  you. The token is constant-time compared and single-use.
+- The agent refuses any order request when trading is off — the MCP cannot
   override that gate.
 - All diagnostics go to stderr; stdout carries only the JSON-RPC protocol.
 

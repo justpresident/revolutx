@@ -6,8 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Signing-agent peer authentication.** The agent now authenticates the
+  connecting peer with a one-time, high-entropy token before exposing the signing
+  oracle, closing the gap where another same-UID process could race to the
+  `0600` socket and trade as you. `AuthToken` (generate / constant-time verify) is
+  exported from the `agent` feature.
+
 ### Changed
 
+- The agent accepts connections **concurrently** and holds each unauthenticated:
+  the only request an unauthenticated peer may issue is `Authenticate`, and the
+  token is consumed on first valid use, so exactly one client can authenticate.
+  Capabilities (base URL, trading policy) are revealed only in the authentication
+  reply — an unauthenticated peer learns nothing. `on_connect` (the watchdog's
+  idle-lock cancel) fires on authentication, not on TCP accept.
+- `revolutx agent start` requires `--auth-token`: it prints the one-time token for
+  the operator to hand to the client out of band (never accepted as an argument
+  value, which would expose it via `/proc` and `ps`).
+- `revolutx-mcp` exposes an `authenticate` tool: the LLM must call it with the
+  agent's token before any other tool works. Order-mutating tools are now always
+  advertised (the agent remains the authoritative trading gate).
 - MSRV is **1.87** (the `Cargo.toml` `rust-version`): the `keystore`/`agent`
   features depend on `rcypher`, which uses `const fn` over `Vec::len` (stable
   since Rust 1.87). 0.2.0 shipped declaring `1.85` by mistake — it does not build

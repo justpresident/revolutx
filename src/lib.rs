@@ -107,7 +107,7 @@ pub mod transport;
 pub mod agent;
 
 #[cfg(feature = "agent")]
-pub use agent::{AgentExecutor, default_socket_path, serve};
+pub use agent::{AgentExecutor, AuthToken, default_socket_path, serve};
 #[cfg(feature = "rest")]
 pub use auth::{Ed25519Signer, RequestAuth, Signer};
 #[cfg(feature = "rest")]

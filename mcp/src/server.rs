@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use revolutx::RevolutXClient;
 use revolutx::agent::{AgentExecutor, default_socket_path};
+use revolutx::{RequestExecutor, RevolutXClient};
 use serde_json::{Value, json};
 
 use crate::protocol::{
@@ -16,18 +16,27 @@ const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "revolutx-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Tool error: the `authenticate` call was missing its token argument.
+const MISSING_TOKEN: &str = "authenticate requires a 'token' string argument";
+/// Tool error: `authenticate` was called but no signing agent is wired in.
+const NO_AGENT: &str = "no signing agent is connected";
+
 /// A configured MCP server over a `revolutx` client.
 pub struct Server {
     client: RevolutXClient,
-    trading_enabled: bool,
+    /// The signing agent, when connected. The MCP authenticates this session
+    /// (with the agent's one-time token, via the `authenticate` tool) before the
+    /// agent will serve any request. `None` only in unit tests, which exercise
+    /// protocol dispatch without a live agent.
+    agent: Option<Arc<AgentExecutor>>,
 }
 
 impl Server {
     #[cfg(test)]
-    pub const fn new(client: RevolutXClient, trading_enabled: bool) -> Self {
+    pub const fn new(client: RevolutXClient) -> Self {
         Self {
             client,
-            trading_enabled,
+            agent: None,
         }
     }
 
@@ -35,15 +44,17 @@ impl Server {
     ///
     /// The agent holds the keystore and does **all** signing and HTTP, so the MCP
     /// keeps no key material and needs no process hardening of its own. The agent
-    /// also owns the environment (base URL) and the trading policy; the MCP reads
-    /// both from the connection handshake. Configuration is a single, optional,
+    /// also owns the environment (base URL) and the trading policy and enforces
+    /// both peer authentication and the trading gate; the MCP learns the policy
+    /// only after authenticating. Configuration is a single, optional,
     /// non-sensitive variable:
     ///
     /// - `REVOLUTX_AGENT_SOCKET` — the agent's unix socket path (default
     ///   `$XDG_RUNTIME_DIR/revolutx-agent.sock`).
     ///
-    /// Whether order-mutating tools are exposed is decided by the agent
-    /// (`revolutx agent start --enable-trading`), not by the MCP.
+    /// The connection starts unauthenticated: the LLM must call the
+    /// `authenticate` tool with the one-time token the operator obtained from
+    /// `revolutx agent start --auth-token` before any other tool works.
     pub async fn from_env() -> Result<Self, String> {
         let socket =
             env_nonempty("REVOLUTX_AGENT_SOCKET").map_or_else(default_socket_path, Into::into);
@@ -53,21 +64,12 @@ impl Server {
                 socket.display()
             )
         })?;
-        // The trading policy is the agent's, surfaced via the handshake.
-        let trading_enabled = executor.trading_enabled();
-        let client = RevolutXClient::with_executor(Arc::new(executor));
+        let agent = Arc::new(executor);
+        let client = RevolutXClient::with_executor(Arc::clone(&agent) as Arc<_>);
         Ok(Self {
             client,
-            trading_enabled,
+            agent: Some(agent),
         })
-    }
-
-    pub fn is_authenticated(&self) -> bool {
-        self.client.is_authenticated()
-    }
-
-    pub const fn trading_enabled(&self) -> bool {
-        self.trading_enabled
     }
 
     /// Handles one JSON-RPC message line. Returns the serialized response line,
@@ -114,7 +116,7 @@ impl Server {
         let response = match method {
             "initialize" => success(id, Self::initialize_result(&params)),
             "ping" => success(id, json!({})),
-            "tools/list" => success(id, json!({ "tools": tools::list(self.trading_enabled) })),
+            "tools/list" => success(id, json!({ "tools": tools::list() })),
             "tools/call" => self.handle_tools_call(id, &params).await,
             other => error(id, METHOD_NOT_FOUND, format!("method not found: {other}")),
         };
@@ -133,7 +135,7 @@ impl Server {
             "protocolVersion": protocol_version,
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-            "instructions": "Tools for the Revolut X crypto exchange. Read-only market data and account tools are always available; order placement and cancellation are only offered when the connected signing agent was started with trading enabled."
+            "instructions": "Tools for the Revolut X crypto exchange, served via a signing agent. Call `authenticate` FIRST with the one-time token the operator obtained from `revolutx agent start --auth-token`; until you do, every other tool fails with \"authenticate first\". Order placement and cancellation additionally require that the agent was started with trading enabled."
         })
     }
 
@@ -146,17 +148,50 @@ impl Server {
             .cloned()
             .unwrap_or_else(|| json!({}));
 
-        match tools::call(&self.client, self.trading_enabled, name, &args).await {
-            Ok(text) => success(
-                id,
-                json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
-            ),
-            Err(message) => success(
-                id,
-                json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
-            ),
+        // `authenticate` is handled here (it acts on the agent connection, which
+        // tools::call does not see); every other tool is forwarded, and the agent
+        // enforces both the auth gate and the trading gate.
+        if name == tools::AUTHENTICATE {
+            return self.authenticate(id, &args).await;
+        }
+
+        match tools::call(&self.client, name, &args).await {
+            Ok(text) => success(id, tool_content(text, false)),
+            Err(message) => success(id, tool_content(message, true)),
         }
     }
+
+    /// Handles the `authenticate` tool: presents the one-time token to the agent.
+    /// On success the agent reveals its environment and trading policy, and every
+    /// other tool becomes usable on this connection.
+    async fn authenticate(&self, id: Value, args: &Value) -> Value {
+        let Some(token) = args.get(tools::ARG_TOKEN).and_then(Value::as_str) else {
+            return success(id, tool_content(MISSING_TOKEN, true));
+        };
+        let Some(agent) = self.agent.as_ref() else {
+            return success(id, tool_content(NO_AGENT, true));
+        };
+        match agent.authenticate(token).await {
+            Ok(()) => {
+                let text = format!(
+                    "Authenticated with the signing agent. Environment: {}; trading {}.",
+                    agent.base_url(),
+                    if agent.trading_enabled() {
+                        "ENABLED"
+                    } else {
+                        "disabled"
+                    }
+                );
+                success(id, tool_content(text, false))
+            }
+            Err(e) => success(id, tool_content(e.to_string(), true)),
+        }
+    }
+}
+
+/// Builds an MCP `tools/call` result body with a single text content block.
+fn tool_content(text: impl Into<String>, is_error: bool) -> Value {
+    json!({ "content": [{ "type": "text", "text": text.into() }], "isError": is_error })
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
@@ -168,14 +203,14 @@ fn env_nonempty(name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn public_server(trading: bool) -> Server {
-        // No credentials: authenticated tools would fail, but the protocol and
-        // gating logic under test never reach the network.
+    fn public_server() -> Server {
+        // No agent connected: tools that reach the network would fail, but the
+        // protocol dispatch under test does not get that far.
         let client = RevolutXClient::builder()
             .base_url("http://127.0.0.1:1/api/1.0")
             .build()
             .unwrap();
-        Server::new(client, trading)
+        Server::new(client)
     }
 
     async fn handle(server: &Server, msg: Value) -> Option<Value> {
@@ -187,7 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_echoes_version_and_advertises_tools() {
-        let server = public_server(false);
+        let server = public_server();
         let resp = handle(
             &server,
             json!({
@@ -205,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn notifications_get_no_response() {
-        let server = public_server(false);
+        let server = public_server();
         let out = server
             .handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
             .await;
@@ -214,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_method_is_method_not_found() {
-        let server = public_server(false);
+        let server = public_server();
         let resp = handle(
             &server,
             json!({ "jsonrpc": "2.0", "id": 2, "method": "frobnicate" }),
@@ -226,7 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_returns_empty_result() {
-        let server = public_server(false);
+        let server = public_server();
         let resp = handle(
             &server,
             json!({ "jsonrpc": "2.0", "id": 3, "method": "ping" }),
@@ -238,9 +273,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_reflects_trading_gate() {
+    async fn tools_list_advertises_authenticate_and_all_tools() {
         let resp = handle(
-            &public_server(false),
+            &public_server(),
             json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list" }),
         )
         .await
@@ -251,30 +286,56 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
+        // The catalog is fixed; the agent gates auth + trading at call time.
+        assert!(names.contains(&"authenticate"));
         assert!(names.contains(&"get_balances"));
-        assert!(!names.contains(&"place_limit_order"));
+        assert!(names.contains(&"place_limit_order"));
     }
 
     #[tokio::test]
-    async fn calling_trading_tool_while_disabled_is_iserror() {
+    async fn authenticate_validates_token_and_reports_missing_agent() {
+        // Missing token argument is a tool error, not a protocol error.
         let resp = handle(
-            &public_server(false),
+            &public_server(),
             json!({
                 "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-                "params": { "name": "cancel_all_orders", "arguments": {} }
+                "params": { "name": "authenticate", "arguments": {} }
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(resp.get("error").is_none());
+        assert_eq!(resp["result"]["isError"], true);
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("token")
+        );
+
+        // With a token but no agent wired (unit-test server), it is a tool error.
+        let resp = handle(
+            &public_server(),
+            json!({
+                "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                "params": { "name": "authenticate", "arguments": { "token": "x" } }
             }),
         )
         .await
         .unwrap();
         assert_eq!(resp["result"]["isError"], true);
-        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("trading is disabled"));
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no signing agent")
+        );
     }
 
     #[tokio::test]
     async fn unknown_tool_is_iserror_not_protocol_error() {
         let resp = handle(
-            &public_server(true),
+            &public_server(),
             json!({
                 "jsonrpc": "2.0", "id": 6, "method": "tools/call",
                 "params": { "name": "nope", "arguments": {} }
@@ -294,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_json_is_parse_error() {
-        let server = public_server(false);
+        let server = public_server();
         let resp: Value =
             serde_json::from_str(&server.handle_line("{not json").await.unwrap()).unwrap();
         assert_eq!(resp["error"]["code"], PARSE_ERROR);

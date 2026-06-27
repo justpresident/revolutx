@@ -1294,6 +1294,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "thiserror",
  "time",

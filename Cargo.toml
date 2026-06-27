@@ -36,8 +36,9 @@ keystore = ["rest", "dep:rcypher", "dep:bincode", "dep:getrandom", "zeroize/deri
 # Signing-agent proxy (unix-only): a `serve()` daemon loop that owns the keystore
 # and does all signing + HTTP, plus a client-side `AgentExecutor` that forwards
 # `RequestSpec`s over a unix socket. Neither the private key nor the API key ever
-# crosses the socket. Implies `rest`.
-agent = ["rest", "dep:tokio", "dep:bincode"]
+# crosses the socket. A one-time handshake token authenticates the peer before
+# the oracle is exposed. Implies `rest`.
+agent = ["rest", "dep:tokio", "dep:bincode", "dep:getrandom", "dep:subtle"]
 
 [dependencies]
 # Shared, always-on: domain models, error types, (de)serialization.
@@ -58,6 +59,8 @@ bincode = { version = "2", optional = true }
 getrandom = { version = "0.3", optional = true }
 # Agent proxy (enabled by the `agent` feature): unix-socket transport + framing.
 tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "time", "sync"], optional = true }
+# Constant-time comparison of the agent's one-time handshake token.
+subtle = { version = "2", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

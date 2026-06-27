@@ -16,12 +16,24 @@
 //! # Wire protocol
 //!
 //! Each message is a `u32` big-endian length prefix followed by that many bytes
-//! of bincode. Requests are [`AgentRequest`] (`Ping`, `Capabilities`, or
-//! `Execute`), responses are [`AgentResponse`] (`Pong`, `Capabilities`,
-//! `Executed`, or `Failed`). On connect, a client first asks for
-//! [`Capabilities`] — the agent reports its base URL and whether order mutations
-//! are allowed, and **enforces** that policy on every `Execute` (a non-`GET`
-//! request is refused unless trading is enabled).
+//! of bincode. Requests are [`AgentRequest`] (`Authenticate`, `Ping`, or
+//! `Execute`), responses are [`AgentResponse`] (`Authenticated`, `Pong`,
+//! `Executed`, or `Failed`).
+//!
+//! # Peer authentication
+//!
+//! The socket's `0600` permissions only prove a connecting peer shares the
+//! agent's UID — they do **not** stop a *different* same-UID process from
+//! connecting to the signing oracle and trading as you. To close that gap, the
+//! agent is started with a one-time [`AuthToken`] (generated and printed to the
+//! operator's terminal). A freshly accepted connection is **unauthenticated**:
+//! the only request it can issue is [`AgentRequest::Authenticate`], and every
+//! other request is refused until it presents the token. The token is compared
+//! in constant time and **consumed on first valid use**, so exactly one
+//! connection can ever authenticate — the single "trade as me" oracle. An
+//! unauthenticated peer learns nothing about the agent (not even its base URL or
+//! trading policy): the [`Capabilities`] are revealed only inside the
+//! [`AgentResponse::Authenticated`] reply.
 //!
 //! # Transport security
 //!
@@ -32,12 +44,20 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bincode::{Decode, Encode};
 use reqwest::Method;
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Notify;
+use tokio::task::JoinSet;
+use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 use crate::transport::{BoxFuture, RawResponse, RequestExecutor, RequestSpec};
@@ -58,29 +78,110 @@ const MAX_RESPONSE_FRAME: u32 = 1024 * 1024;
 /// healthy idle client legitimately sends nothing between requests.
 const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Wrong-token attempts tolerated on a single connection before it is dropped. A
+/// legitimate client presents the right token on the first try; this only bounds
+/// chatter, since the token is high-entropy and single-use (brute force is
+/// infeasible regardless).
+const MAX_AUTH_ATTEMPTS: u32 = 5;
+
+/// Random bytes in a handshake token: 256 bits of entropy from the OS CSPRNG.
+const TOKEN_BYTES: usize = 32;
+
+/// Refusal sent when a connection presents a wrong or already-spent token.
+const MSG_AUTH_FAILED: &str = "authentication failed: wrong or already-used token";
+/// Refusal sent when an unauthenticated connection issues a non-`Authenticate`
+/// request.
+const MSG_AUTH_REQUIRED: &str = "authenticate first: present the agent's one-time token";
+/// Refusal sent when an already-authenticated connection re-authenticates.
+const MSG_ALREADY_AUTHENTICATED: &str = "already authenticated";
+
+/// A one-time, high-entropy token that authenticates the connecting peer before
+/// the signing oracle is exposed.
+///
+/// The agent generates one at startup, prints it **once** to the operator's
+/// terminal, and the authenticating client presents it in the
+/// [`AgentRequest::Authenticate`] handshake. It is never accepted as a
+/// command-line argument value (that would expose it via `/proc/<pid>/cmdline`
+/// and `ps` to the very same-UID attacker this defends against): the operator
+/// copies the printed value out of band. The token is compared in constant time
+/// and consumed on first valid use.
+pub struct AuthToken(Zeroizing<String>);
+
+impl AuthToken {
+    /// Generates a fresh token from operating-system randomness, URL-safe-base64
+    /// encoded so it is easy to copy and paste.
+    pub fn generate() -> Result<Self> {
+        // The raw bytes are wiped as soon as they are encoded; only the printable
+        // form (itself zeroizing) is retained.
+        let mut bytes = Zeroizing::new([0u8; TOKEN_BYTES]);
+        getrandom::fill(bytes.as_mut_slice())
+            .map_err(|e| Error::agent(format!("could not read OS randomness for token: {e}")))?;
+        Ok(Self(Zeroizing::new(
+            URL_SAFE_NO_PAD.encode(bytes.as_slice()),
+        )))
+    }
+
+    /// The printable token string — the value to hand to the authenticating
+    /// client.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Constant-time comparison against a candidate, so a wrong guess cannot be
+    /// refined by timing. Defense in depth atop the token's entropy and
+    /// single-use nature.
+    fn verify(&self, candidate: &str) -> bool {
+        self.0.as_bytes().ct_eq(candidate.as_bytes()).into()
+    }
+}
+
+impl std::fmt::Debug for AuthToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render the secret, even in diagnostics.
+        f.debug_tuple("AuthToken").field(&"<redacted>").finish()
+    }
+}
+
 /// A request sent from a client to the agent.
-#[derive(Debug, Encode, Decode)]
+#[derive(Encode, Decode)]
 pub enum AgentRequest {
-    /// Liveness check.
+    /// Present the one-time handshake token. The only request an unauthenticated
+    /// connection may issue; on success the agent replies with
+    /// [`AgentResponse::Authenticated`].
+    Authenticate(String),
+    /// Liveness check (only after authentication).
     Ping,
-    /// Ask the agent what it allows (target base URL, whether trading is on).
-    Capabilities,
-    /// Execute a forwarded request (the agent signs and sends it).
+    /// Execute a forwarded request — the agent signs and sends it (only after
+    /// authentication).
     Execute(WireRequest),
+}
+
+impl std::fmt::Debug for AgentRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact the candidate token so it cannot leak through a Debug render.
+        match self {
+            Self::Authenticate(_) => f.write_str("Authenticate(<redacted>)"),
+            Self::Ping => f.write_str("Ping"),
+            Self::Execute(wire) => f.debug_tuple("Execute").field(wire).finish(),
+        }
+    }
 }
 
 /// A response sent from the agent back to a client.
 #[derive(Debug, Encode, Decode)]
 pub enum AgentResponse {
+    /// Authentication succeeded — carries the [`Capabilities`] (revealed only
+    /// now, never to an unauthenticated peer).
+    Authenticated(Capabilities),
     /// Reply to [`AgentRequest::Ping`].
     Pong,
-    /// Reply to [`AgentRequest::Capabilities`].
-    Capabilities(Capabilities),
     /// A completed request's raw response.
     Executed(WireResponse),
-    /// The agent could not execute the request, or refused it (the message is
-    /// human-readable and intentionally coarse — it must not leak credential
-    /// material).
+    /// The agent could not execute the request, or refused it (e.g. the
+    /// connection has not authenticated, or the token was wrong/already used).
+    /// The message is human-readable and intentionally coarse — it must not leak
+    /// credential material.
     Failed(String),
 }
 
@@ -176,62 +277,84 @@ fn decode<T: Decode<()>>(bytes: &[u8]) -> std::io::Result<T> {
 
 /// A [`RequestExecutor`] that forwards every request to a running agent.
 ///
-/// It holds a **single persistent connection** for its lifetime — the agent
-/// accepts exactly one client and refuses the rest — and serializes requests
-/// over it, so concurrent [`execute`](RequestExecutor::execute) calls are safe
-/// but run one at a time.
+/// It holds a **single persistent connection** for its lifetime and serializes
+/// requests over it, so concurrent [`execute`](RequestExecutor::execute) calls
+/// are safe but run one at a time. The connection starts **unauthenticated**:
+/// call [`authenticate`](Self::authenticate) with the agent's one-time token
+/// before issuing any other request, or the agent refuses them.
 #[derive(Debug)]
 pub struct AgentExecutor {
-    base_url: String,
-    trading_enabled: bool,
     conn: tokio::sync::Mutex<UnixStream>,
+    /// The agent's base URL and trading policy — learned only on successful
+    /// authentication, so unset until then.
+    caps: OnceLock<Capabilities>,
+    authenticated: AtomicBool,
 }
 
 impl AgentExecutor {
-    /// Connects to the agent at `socket_path` and performs the capabilities
-    /// handshake. The agent reports its own base URL and trading policy, so the
-    /// client needs no environment configuration of its own.
+    /// Opens the connection to the agent at `socket_path`. No request is sent
+    /// yet: the connection is unauthenticated until
+    /// [`authenticate`](Self::authenticate) succeeds, and the agent reveals
+    /// nothing (not even its base URL) before then.
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self> {
         let socket_path = socket_path.as_ref();
-        let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
+        let stream = UnixStream::connect(socket_path).await.map_err(|e| {
             Error::agent(format!(
                 "cannot connect to agent at {}: {e}",
                 socket_path.display()
             ))
         })?;
-
-        // Handshake: learn the agent's base URL and trading policy up front.
-        write_frame(&mut stream, &AgentRequest::Capabilities)
-            .await
-            .map_err(|e| Error::agent(format!("capabilities handshake failed: {e}")))?;
-        let bytes = read_frame_bytes(&mut stream, MAX_RESPONSE_FRAME)
-            .await
-            .map_err(|e| Error::agent(format!("capabilities handshake failed: {e}")))?;
-        let AgentResponse::Capabilities(caps) = decode::<AgentResponse>(&bytes)
-            .map_err(|e| Error::agent(format!("invalid capabilities response: {e}")))?
-        else {
-            return Err(Error::agent("agent did not answer with capabilities"));
-        };
-
         Ok(Self {
-            base_url: caps.base_url,
-            trading_enabled: caps.trading_enabled,
             conn: tokio::sync::Mutex::new(stream),
+            caps: OnceLock::new(),
+            authenticated: AtomicBool::new(false),
         })
     }
 
-    /// Whether the agent will execute order-mutating requests. Determined by the
-    /// agent at startup and read during the connection handshake.
+    /// Presents the agent's one-time token. On success the agent reveals its
+    /// [`Capabilities`] (base URL + trading policy), which are cached for
+    /// [`base_url`](RequestExecutor::base_url) and
+    /// [`trading_enabled`](Self::trading_enabled), and the connection becomes
+    /// authenticated. The token is single-use: a second connection presenting it
+    /// is refused. A wrong token returns an error but leaves the connection open
+    /// to retry.
+    pub async fn authenticate(&self, token: &str) -> Result<()> {
+        match self
+            .round_trip(&AgentRequest::Authenticate(token.to_owned()))
+            .await?
+        {
+            AgentResponse::Authenticated(caps) => {
+                // Set-once; a redundant authenticate cannot clobber the policy.
+                let _ = self.caps.set(caps);
+                self.authenticated.store(true, Ordering::Release);
+                Ok(())
+            }
+            AgentResponse::Failed(message) => Err(Error::agent(message)),
+            AgentResponse::Pong | AgentResponse::Executed(_) => Err(Error::agent(
+                "agent did not answer the authentication handshake",
+            )),
+        }
+    }
+
+    /// Whether this connection has authenticated.
     #[must_use]
-    pub const fn trading_enabled(&self) -> bool {
-        self.trading_enabled
+    pub fn is_session_authenticated(&self) -> bool {
+        self.authenticated.load(Ordering::Acquire)
+    }
+
+    /// Whether the agent will execute order-mutating requests. Reported by the
+    /// agent on authentication; `false` until then.
+    #[must_use]
+    pub fn trading_enabled(&self) -> bool {
+        self.caps.get().is_some_and(|caps| caps.trading_enabled)
     }
 
     /// Checks that the agent is responding (sent over the established
-    /// connection).
+    /// connection). Only meaningful after authentication.
     pub async fn ping(&self) -> Result<()> {
         match self.round_trip(&AgentRequest::Ping).await? {
             AgentResponse::Pong => Ok(()),
+            AgentResponse::Failed(message) => Err(Error::agent(message)),
             _ => Err(Error::agent("agent did not answer ping with Pong")),
         }
     }
@@ -270,7 +393,7 @@ impl RequestExecutor for AgentExecutor {
                     body: w.body,
                 }),
                 AgentResponse::Failed(message) => Err(Error::agent(message)),
-                AgentResponse::Pong | AgentResponse::Capabilities(_) => {
+                AgentResponse::Pong | AgentResponse::Authenticated(_) => {
                     Err(Error::agent("unexpected agent response to an Execute"))
                 }
             }
@@ -278,32 +401,37 @@ impl RequestExecutor for AgentExecutor {
     }
 
     fn base_url(&self) -> &str {
-        &self.base_url
+        // Known only after authentication; empty until then (the agent path uses
+        // this for display only — the agent itself joins paths to the real URL).
+        self.caps.get().map_or("", |caps| caps.base_url.as_str())
     }
 
     fn is_authenticated(&self) -> bool {
-        // The agent holds the credentials; from the client's view it is always
-        // capable of signing.
-        true
+        // The agent holds the credentials, so once this connection has
+        // authenticated it can sign on our behalf.
+        self.is_session_authenticated()
     }
 }
 
 // --- server side -----------------------------------------------------------
 
-/// Serves the agent protocol on a unix socket at `socket_path` for **exactly one
-/// client**, then returns.
+/// Serves the agent protocol on a unix socket at `socket_path` until the
+/// authenticated client disconnects, then returns.
 ///
-/// The first connection is accepted and served (every `Execute` is dispatched to
-/// `executor`, a credential-holding [`crate::transport::LocalExecutor`]). Any
-/// further connection attempt is accepted and immediately closed — the agent is
-/// a single "trade as me" oracle, so concurrent clients and reconnects are
-/// refused. When the one client disconnects, this returns and the daemon exits,
-/// re-locking the vault. `on_connect` fires once, when that client connects — the
-/// daemon uses it to cancel its pre-connection idle timeout.
+/// Connections are accepted **concurrently** and each starts unauthenticated: it
+/// may only issue [`AgentRequest::Authenticate`], and every other request is
+/// refused. The first connection to present the matching `token` consumes it
+/// (atomically, constant-time compared) and becomes the single authenticated
+/// client — the "trade as me" oracle. `on_connect` fires once, at that moment
+/// (**not** on TCP accept), so the daemon's pre-connection idle auto-lock is
+/// cancelled only by a genuinely authenticated peer, never by an attacker merely
+/// connecting. When that client disconnects, this returns and the daemon exits,
+/// re-locking the vault; the token is already spent, so no later connection can
+/// authenticate.
 ///
 /// `trading_enabled` is the authoritative order-mutation policy: when `false`,
 /// the agent refuses every non-`GET` request regardless of what the client
-/// believes. It is reported to the client during the capabilities handshake.
+/// believes. It is reported to the client inside the authentication reply.
 ///
 /// The socket is created with `0600` permissions. If a live agent is already
 /// listening on `socket_path` this returns an error; a stale socket file (no
@@ -312,27 +440,98 @@ pub async fn serve(
     executor: Arc<dyn RequestExecutor>,
     socket_path: &Path,
     trading_enabled: bool,
+    token: AuthToken,
     on_connect: impl FnOnce() + Send,
 ) -> Result<()> {
     let listener = bind(socket_path).await?;
 
-    let (mut stream, _addr) = listener
-        .accept()
-        .await
-        .map_err(|e| Error::agent(format!("agent accept failed: {e}")))?;
+    let gate = Arc::new(tokio::sync::Mutex::new(Gate {
+        token,
+        consumed: false,
+    }));
+    // Fired once, by the connection that authenticates.
+    let authenticated = Arc::new(Notify::new());
+    // Fired when the authenticated client's session ends (it disconnected).
+    let session_ended = Arc::new(Notify::new());
+
+    let accept = tokio::spawn(accept_loop(
+        listener,
+        gate,
+        executor,
+        trading_enabled,
+        Arc::clone(&authenticated),
+        Arc::clone(&session_ended),
+    ));
+
+    // Block until someone authenticates, then cancel the idle auto-lock; then
+    // block until that client disconnects. Unauthenticated peers coming and going
+    // never end the daemon — the watchdog's idle timeout covers "nobody ever
+    // authenticated".
+    authenticated.notified().await;
     on_connect();
+    session_ended.notified().await;
 
-    // Keep the listener alive (so a second daemon's liveness probe still sees us)
-    // but refuse every further connection by closing it immediately.
-    let rejector = tokio::spawn(async move {
-        while let Ok((extra, _addr)) = listener.accept().await {
-            drop(extra);
-        }
-    });
-
-    handle_connection(executor.as_ref(), &mut stream, trading_enabled).await;
-    rejector.abort();
+    accept.abort();
     Ok(())
+}
+
+/// The one-time authentication gate shared by every connection: the token is
+/// consumed by the first connection to prove it.
+struct Gate {
+    token: AuthToken,
+    consumed: bool,
+}
+
+/// Atomically checks a candidate against the unspent token. Returns `true` and
+/// marks the token spent on the first valid presentation; `false` afterwards, or
+/// for a wrong candidate (which does **not** spend it).
+async fn try_consume(gate: &tokio::sync::Mutex<Gate>, candidate: &str) -> bool {
+    let mut gate = gate.lock().await;
+    if gate.consumed {
+        return false;
+    }
+    if gate.token.verify(candidate) {
+        gate.consumed = true;
+        true
+    } else {
+        false
+    }
+}
+
+/// Accepts connections forever, serving each in its own task. The [`JoinSet`] is
+/// dropped — aborting any still-open connections — when this future is dropped,
+/// which `serve` does once the authenticated session ends.
+async fn accept_loop(
+    listener: UnixListener,
+    gate: Arc<tokio::sync::Mutex<Gate>>,
+    executor: Arc<dyn RequestExecutor>,
+    trading_enabled: bool,
+    authenticated: Arc<Notify>,
+    session_ended: Arc<Notify>,
+) {
+    let mut sessions = JoinSet::new();
+    loop {
+        // Reap finished connections so the set does not grow with churn.
+        while sessions.try_join_next().is_some() {}
+        let Ok((stream, _addr)) = listener.accept().await else {
+            return;
+        };
+        let gate = Arc::clone(&gate);
+        let executor = Arc::clone(&executor);
+        let authenticated = Arc::clone(&authenticated);
+        let session_ended = Arc::clone(&session_ended);
+        sessions.spawn(async move {
+            handle_connection(
+                stream,
+                &gate,
+                executor.as_ref(),
+                trading_enabled,
+                &authenticated,
+                &session_ended,
+            )
+            .await;
+        });
+    }
 }
 
 /// Binds the socket, refusing to clobber a live agent and cleaning up a stale
@@ -403,33 +602,89 @@ fn set_socket_permissions(_socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Serves one connection. It is unauthenticated until it presents the token;
+/// before then only [`AgentRequest::Authenticate`] is honored (every other
+/// request is refused without revealing anything about the agent). After
+/// authentication it serves `Ping`/`Execute` until the client disconnects, then
+/// signals `session_ended` so the daemon can re-lock and exit.
 async fn handle_connection(
+    mut stream: UnixStream,
+    gate: &tokio::sync::Mutex<Gate>,
     executor: &dyn RequestExecutor,
-    stream: &mut UnixStream,
     trading_enabled: bool,
+    authenticated: &Notify,
+    session_ended: &Notify,
 ) {
+    let mut is_authenticated = false;
+    let mut attempts: u32 = 0;
     loop {
         // A closed connection or a malformed frame just ends this session.
-        let Ok(bytes) = read_frame_bytes(stream, MAX_REQUEST_FRAME).await else {
-            return;
+        let Ok(bytes) = read_frame_bytes(&mut stream, MAX_REQUEST_FRAME).await else {
+            break;
         };
         let request: AgentRequest = match decode(&bytes) {
             Ok(request) => request,
-            Err(_) => return,
+            Err(_) => break,
         };
+
+        if !is_authenticated {
+            match request {
+                AgentRequest::Authenticate(candidate) => {
+                    // Wipe the candidate after comparison — it is the token.
+                    let candidate = Zeroizing::new(candidate);
+                    if try_consume(gate, candidate.as_str()).await {
+                        is_authenticated = true;
+                        authenticated.notify_one();
+                        let caps = Capabilities {
+                            base_url: executor.base_url().to_owned(),
+                            trading_enabled,
+                        };
+                        if write_frame(&mut stream, &AgentResponse::Authenticated(caps))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    } else {
+                        attempts += 1;
+                        let refused = AgentResponse::Failed(MSG_AUTH_FAILED.to_owned());
+                        // Keep the connection open to retry, up to the attempt cap.
+                        if write_frame(&mut stream, &refused).await.is_err()
+                            || attempts >= MAX_AUTH_ATTEMPTS
+                        {
+                            break;
+                        }
+                    }
+                }
+                AgentRequest::Ping | AgentRequest::Execute(_) => {
+                    // Refuse, but keep the connection open so a client that issued
+                    // a request early can still authenticate and retry on it.
+                    let refused = AgentResponse::Failed(MSG_AUTH_REQUIRED.to_owned());
+                    if write_frame(&mut stream, &refused).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
 
         let response = match request {
             AgentRequest::Ping => AgentResponse::Pong,
-            AgentRequest::Capabilities => AgentResponse::Capabilities(Capabilities {
-                base_url: executor.base_url().to_owned(),
-                trading_enabled,
-            }),
             AgentRequest::Execute(wire) => execute_forwarded(executor, wire, trading_enabled).await,
+            // Re-authenticating an already-authenticated connection is a no-op.
+            AgentRequest::Authenticate(_) => {
+                AgentResponse::Failed(MSG_ALREADY_AUTHENTICATED.to_owned())
+            }
         };
 
-        if write_frame(stream, &response).await.is_err() {
-            return;
+        if write_frame(&mut stream, &response).await.is_err() {
+            break;
         }
+    }
+
+    if is_authenticated {
+        // The one authenticated client has gone: end the daemon (re-lock vault).
+        session_ended.notify_one();
     }
 }
 
@@ -504,19 +759,49 @@ mod tests {
         panic!("socket never appeared");
     }
 
-    fn spawn_echo(socket: PathBuf, trading: bool) -> tokio::task::JoinHandle<Result<()>> {
-        tokio::spawn(async move { serve(Arc::new(EchoExecutor), &socket, trading, || {}).await })
+    /// Spawns an echo agent and returns its one-time token alongside the handle.
+    fn spawn_echo(socket: PathBuf, trading: bool) -> (String, tokio::task::JoinHandle<Result<()>>) {
+        let token = AuthToken::generate().unwrap();
+        let secret = token.as_str().to_owned();
+        let handle = tokio::spawn(async move {
+            serve(Arc::new(EchoExecutor), &socket, trading, token, || {}).await
+        });
+        (secret, handle)
+    }
+
+    #[test]
+    fn token_generate_is_unique_and_verifies_in_constant_time() {
+        let a = AuthToken::generate().unwrap();
+        let b = AuthToken::generate().unwrap();
+        assert_ne!(a.as_str(), b.as_str(), "tokens must be unique");
+        assert!(!a.as_str().is_empty());
+        assert!(a.verify(a.as_str()));
+        assert!(!a.verify(b.as_str()));
+        assert!(!a.verify(""));
+        // Debug never leaks the secret.
+        assert!(!format!("{a:?}").contains(a.as_str()));
     }
 
     #[tokio::test]
-    async fn round_trips_and_reports_capabilities() {
+    async fn authenticated_round_trips_and_reports_capabilities() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let server = spawn_echo(socket.clone(), false);
+        let (token, server) = spawn_echo(socket.clone(), false);
         wait_for(&socket).await;
 
-        // The handshake learns the agent's base URL and trading policy.
         let executor = AgentExecutor::connect(&socket).await.unwrap();
+        // Before authentication the agent reveals nothing and refuses requests.
+        assert!(!executor.is_session_authenticated());
+        assert_eq!(executor.base_url(), "");
+        let err = executor
+            .execute(RequestSpec::get("/balances"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Agent { .. }));
+
+        // Authenticating reveals the agent's base URL and trading policy.
+        executor.authenticate(&token).await.unwrap();
+        assert!(executor.is_session_authenticated());
         assert_eq!(executor.base_url(), "http://stub/api/1.0");
         assert!(!executor.trading_enabled());
 
@@ -538,16 +823,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_refuses_mutations_when_trading_disabled() {
+    async fn wrong_token_is_refused_then_correct_token_still_works() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let server = spawn_echo(socket.clone(), false);
+        let (token, server) = spawn_echo(socket.clone(), false);
         wait_for(&socket).await;
 
         let executor = AgentExecutor::connect(&socket).await.unwrap();
+        // A wrong guess is rejected and does NOT spend the token; the connection
+        // stays open so the right token still authenticates it.
+        assert!(executor.authenticate("not-the-token").await.is_err());
+        assert!(!executor.is_session_authenticated());
+        executor.authenticate(&token).await.unwrap();
+        assert!(executor.is_session_authenticated());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn token_is_single_use_across_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (token, server) = spawn_echo(socket.clone(), false);
+        wait_for(&socket).await;
+
+        // First client consumes the token and owns the oracle.
+        let first = AgentExecutor::connect(&socket).await.unwrap();
+        first.authenticate(&token).await.unwrap();
+        first.ping().await.unwrap();
+
+        // A second client connects but the token is already spent.
+        let second = AgentExecutor::connect(&socket).await.unwrap();
+        assert!(second.authenticate(&token).await.is_err());
+        assert!(!second.is_session_authenticated());
+
+        // The first client is unaffected.
+        first.ping().await.unwrap();
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_refuses_mutations_when_trading_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (token, server) = spawn_echo(socket.clone(), false);
+        wait_for(&socket).await;
+
+        let executor = AgentExecutor::connect(&socket).await.unwrap();
+        executor.authenticate(&token).await.unwrap();
         assert!(!executor.trading_enabled());
 
-        // Reads are always allowed.
+        // Reads are allowed.
         executor
             .execute(RequestSpec::get("/orders/active"))
             .await
@@ -566,10 +893,11 @@ mod tests {
     async fn agent_allows_mutations_when_trading_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let server = spawn_echo(socket.clone(), true);
+        let (token, server) = spawn_echo(socket.clone(), true);
         wait_for(&socket).await;
 
         let executor = AgentExecutor::connect(&socket).await.unwrap();
+        executor.authenticate(&token).await.unwrap();
         assert!(executor.trading_enabled());
         let raw = executor
             .execute(RequestSpec::delete("/orders/abc"))
@@ -581,12 +909,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_connect_fires_once_when_the_client_connects() {
+    async fn on_connect_fires_once_on_authentication_not_on_accept() {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
 
+        let token = AuthToken::generate().unwrap();
+        let secret = token.as_str().to_owned();
         let connects = Arc::new(AtomicU64::new(0));
         let on_connect = {
             let connects = Arc::clone(&connects);
@@ -596,16 +926,19 @@ mod tests {
         };
         let server = {
             let socket = socket.clone();
-            tokio::spawn(
-                async move { serve(Arc::new(EchoExecutor), &socket, false, on_connect).await },
-            )
+            tokio::spawn(async move {
+                serve(Arc::new(EchoExecutor), &socket, false, token, on_connect).await
+            })
         };
         wait_for(&socket).await;
-        assert_eq!(connects.load(Ordering::Relaxed), 0, "not yet connected");
 
-        // connect() does the capabilities handshake, then two pings — still one
-        // accepted connection, so `on_connect` fires exactly once.
+        // Merely connecting must NOT fire on_connect.
         let executor = AgentExecutor::connect(&socket).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(connects.load(Ordering::Relaxed), 0, "not authenticated yet");
+
+        // Authenticating fires it exactly once, regardless of later requests.
+        executor.authenticate(&secret).await.unwrap();
         executor.ping().await.unwrap();
         executor.ping().await.unwrap();
         assert_eq!(connects.load(Ordering::Relaxed), 1);
@@ -614,23 +947,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_a_second_client_connection() {
+    async fn serve_returns_when_the_authenticated_client_disconnects() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let server = spawn_echo(socket.clone(), false);
+        let (token, server) = spawn_echo(socket.clone(), false);
         wait_for(&socket).await;
 
-        // First client owns the connection.
-        let first = AgentExecutor::connect(&socket).await.unwrap();
-        first.ping().await.unwrap();
-
-        // A second client is accepted at the socket layer but closed immediately
-        // by the rejector, so even its handshake fails.
-        assert!(AgentExecutor::connect(&socket).await.is_err());
-
-        // The first client is unaffected.
-        first.ping().await.unwrap();
-
-        server.abort();
+        let executor = AgentExecutor::connect(&socket).await.unwrap();
+        executor.authenticate(&token).await.unwrap();
+        executor.ping().await.unwrap();
+        // Dropping the authenticated client ends its session, so `serve` returns.
+        drop(executor);
+        let outcome = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("serve should return after the authenticated client leaves");
+        assert!(outcome.unwrap().is_ok());
     }
 }
