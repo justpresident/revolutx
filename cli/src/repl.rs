@@ -83,8 +83,16 @@ fn run_line(global: &GlobalOpts, runtime: &Runtime, client: &RevolutXClient, lin
     if tokens.is_empty() {
         return Ok(());
     }
-    // Reuse the one-shot grammar; a parse error (incl. `--help`) is reported as-is.
-    let parsed = ReplLine::try_parse_from(tokens).map_err(|e| e.to_string())?;
+    // Reuse the one-shot grammar. clap reports `--help` and parse errors via an
+    // `Err`; let it print them itself (help → stdout, errors → stderr) rather than
+    // dressing help up as an "error:".
+    let parsed = match ReplLine::try_parse_from(tokens) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            let _ = e.print();
+            return Ok(());
+        }
+    };
     if matches!(
         parsed.command,
         ArgCommand::Vault { .. } | ArgCommand::Agent { .. } | ArgCommand::Cli

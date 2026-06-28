@@ -107,19 +107,26 @@ impl Presenter for HumanPresenter {
             }
             CommandOutput::Orders(page) => {
                 lines.push(format!(
-                    "{:<38} {:<5} {:<8} {:<18} {:>16} {:>16} {:>16}",
-                    "ID", "SIDE", "TYPE", "STATUS", "FILLED", "QTY", "PRICE"
+                    "{:<12} {:<5} {:<8} {:<16} {:>16} {:>16} {:>16}  {}",
+                    "SYMBOL", "SIDE", "TYPE", "STATUS", "QTY", "FILLED", "PRICE", "ID"
                 ));
                 for o in &page.items {
+                    // `price` is the limit price — absent for market orders; fall
+                    // back to the average fill price so the row isn't blank.
+                    let price = o
+                        .price
+                        .or(o.average_fill_price)
+                        .map_or_else(|| "-".to_owned(), |p| p.to_string());
                     lines.push(format!(
-                        "{:<38} {:<5} {:<8} {:<18} {:>16} {:>16} {:>16}",
-                        o.id,
+                        "{:<12} {:<5} {:<8} {:<16} {:>16} {:>16} {:>16}  {}",
+                        o.symbol,
                         o.side,
                         o.order_type.as_str(),
                         o.status.as_str(),
-                        o.filled_quantity,
                         o.quantity,
-                        o.price.map(|p| p.to_string()).unwrap_or_default()
+                        o.filled_quantity,
+                        price,
+                        o.id
                     ));
                 }
                 if let Some(cursor) = &page.next_cursor {

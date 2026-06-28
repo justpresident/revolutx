@@ -164,11 +164,11 @@ pub enum MarketCmd {
         /// Interval in minutes (1,5,15,30,60,240,1440,2880,5760,10080,20160,40320).
         #[arg(long)]
         interval: Option<i64>,
-        /// Start time, Unix epoch milliseconds.
-        #[arg(long)]
+        /// Start time: a date/time (`2024-01-31`), a relative (`7d`), or epoch ms.
+        #[arg(long, value_parser = crate::datetime::parse_when)]
         since: Option<i64>,
-        /// End time, Unix epoch milliseconds.
-        #[arg(long)]
+        /// End time (same formats as `--since`).
+        #[arg(long, value_parser = crate::datetime::parse_when)]
         until: Option<i64>,
     },
     /// Latest public trades (no credentials).
@@ -201,11 +201,12 @@ pub enum OrderCmd {
     Historical {
         #[arg(long)]
         symbol: Vec<String>,
-        /// Start of the query range, Unix epoch milliseconds.
-        #[arg(long)]
+        /// Start of the range: a date/time (`2024-01-31`, `"2024-01-31 14:30"`), a
+        /// relative offset (`7d`, `24h`), an RFC3339 timestamp, or epoch ms.
+        #[arg(long, value_parser = crate::datetime::parse_when)]
         start_date: Option<i64>,
-        /// End of the query range, Unix epoch milliseconds.
-        #[arg(long)]
+        /// End of the range (same formats as `--start-date`; defaults to now).
+        #[arg(long, value_parser = crate::datetime::parse_when)]
         end_date: Option<i64>,
         /// Pagination cursor from a previous page.
         #[arg(long)]
@@ -297,11 +298,12 @@ pub enum TradeCmd {
     /// Public market trades for a symbol.
     All {
         symbol: String,
-        /// Start of the query range, Unix epoch milliseconds.
-        #[arg(long)]
+        /// Start of the range: a date/time (`2024-01-31`, `"2024-01-31 14:30"`), a
+        /// relative offset (`7d`, `24h`), an RFC3339 timestamp, or epoch ms.
+        #[arg(long, value_parser = crate::datetime::parse_when)]
         start_date: Option<i64>,
-        /// End of the query range, Unix epoch milliseconds.
-        #[arg(long)]
+        /// End of the range (same formats as `--start-date`; defaults to now).
+        #[arg(long, value_parser = crate::datetime::parse_when)]
         end_date: Option<i64>,
         /// Pagination cursor from a previous page.
         #[arg(long)]
@@ -312,11 +314,12 @@ pub enum TradeCmd {
     /// Your own (private) trades for a symbol.
     Mine {
         symbol: String,
-        /// Start of the query range, Unix epoch milliseconds.
-        #[arg(long)]
+        /// Start of the range: a date/time (`2024-01-31`, `"2024-01-31 14:30"`), a
+        /// relative offset (`7d`, `24h`), an RFC3339 timestamp, or epoch ms.
+        #[arg(long, value_parser = crate::datetime::parse_when)]
         start_date: Option<i64>,
-        /// End of the query range, Unix epoch milliseconds.
-        #[arg(long)]
+        /// End of the range (same formats as `--start-date`; defaults to now).
+        #[arg(long, value_parser = crate::datetime::parse_when)]
         end_date: Option<i64>,
         /// Pagination cursor from a previous page.
         #[arg(long)]
