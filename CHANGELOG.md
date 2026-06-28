@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Shared command layer** (`commands` feature, opt-in): a parse-neutral
+  `Command` model, a single `execute` dispatcher onto a `RevolutXClient`, a
+  structured `CommandOutput` (serializes to the bare SDK response), and a
+  `Presenter` seam with a shared `JsonPresenter`. Adds no dependencies. The CLI
+  one-shot path and the new interactive shell run on it; the MCP can adopt it
+  next so all three parse/dispatch identically and differ only in presentation.
+- **`revolutx cli` interactive shell**: unlocks the vault once, then a REPL
+  running the same commands with history, line editing, and Tab-completion of
+  commands and trading symbols. Real-trading commands prompt for confirmation
+  instead of requiring `--yes`; `market watch` streams until Ctrl-C.
+- CLI parity flags so its commands match the shared model: `--side`/`--cursor` on
+  `orders active`, dates + `--cursor` on `orders historical` and `trades`, and
+  `--client-order-id` on `orders limit`/`market`.
+
 ### Changed
 
 - **Credential vault adopts rcypher 0.3's `SecretStore` format.** The vault is now

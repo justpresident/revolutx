@@ -59,6 +59,26 @@ revolutx --json market tickers                  # machine-readable output
 For dev/CI you can bypass the vault with `--insecure-env` (plaintext credentials
 from `REVOLUTX_API_KEY` / `REVOLUTX_PRIVATE_KEY_PEM` / `REVOLUTX_PRIVATE_KEY_PATH`).
 
+## Interactive shell
+
+`revolutx cli` unlocks the vault **once** and drops into an interactive shell that
+runs the same commands, with history (↑/↓), line editing, and Tab-completion of
+commands and trading symbols:
+
+```text
+$ revolutx cli
+revolutx interactive shell — run a command, `help`, or `exit` (Ctrl-D to quit).
+revolutx> market tickers BTC-USD
+revolutx> orders active --side buy
+revolutx> orders cancel <ID>
+This is REAL trading. Proceed? [y/N]: y
+revolutx> exit
+```
+
+Real-trading commands prompt for confirmation here instead of needing `--yes`.
+Prefix a line with `--json` for raw JSON. `market watch <SYMBOL>` streams until
+Ctrl-C returns you to the prompt.
+
 ## Signing agent (headless / no-TTY clients)
 
 A headless client (such as the MCP server) has no terminal to prompt for the

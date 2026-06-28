@@ -24,11 +24,14 @@ default = ["fido2"]
 fido2 = ["rcypher/fido2"]
 
 [dependencies]
-revolutx = { path = "..", version = "0.2", features = ["rest", "keystore", "agent"] }
+revolutx = { path = "..", version = "0.2", features = ["rest", "keystore", "agent", "commands"] }
 # rcypher's storage format + interactive unlock plumbing (prompts, strength gate,
 # the multi-factor unlock loop). The on-disk vault is rcypher's standard format.
 rcypher = { version = "0.3", default-features = false, features = ["storage", "cli"] }
 clap = { version = "4", features = ["derive"] }
+# Interactive shell line editor (the `cli` command): history, editing, and
+# command/symbol autocomplete.
+rustyline = "18"
 serde = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "net", "time", "signal", "macros", "sync"] }

@@ -24,11 +24,15 @@
     clippy::missing_panics_doc
 )]
 
+mod adapter;
 mod agent;
 mod args;
-mod commands;
 mod creds;
-mod output;
+mod helper;
+mod human;
+mod line;
+mod oneshot;
+mod repl;
 
 use std::process::ExitCode;
 
@@ -64,6 +68,8 @@ fn main() -> ExitCode {
         // The agent daemon owns its own runtime + watchdog (the watchdog thread
         // must be spawned after the fork above, before any runtime).
         Command::Agent { command } => finish(agent::run(&global, command)),
+        // The interactive shell unlocks the vault once and owns its own runtime.
+        Command::Cli => finish(repl::run(&global)),
         // Every other command is a one-shot over a `RevolutXClient`.
         command => {
             // Resolve credentials (may prompt) before entering the async runtime.
@@ -83,7 +89,7 @@ fn main() -> ExitCode {
                 }
             };
 
-            finish(runtime.block_on(commands::run(&global, command, &client)))
+            finish(runtime.block_on(oneshot::run(&global, command, &client)))
         }
     }
 }

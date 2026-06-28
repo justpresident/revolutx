@@ -100,6 +100,8 @@ pub mod fix;
 
 #[cfg(feature = "rest")]
 mod auth;
+#[cfg(feature = "commands")]
+pub mod commands;
 #[cfg(feature = "rest")]
 mod keygen;
 #[cfg(feature = "rest")]

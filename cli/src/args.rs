@@ -76,6 +76,9 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCmd,
     },
+    /// Open the vault once and enter an interactive shell that runs the same
+    /// commands (with history and command/symbol autocomplete).
+    Cli,
 }
 
 impl Command {
@@ -185,6 +188,12 @@ pub enum OrderCmd {
     Active {
         #[arg(long)]
         symbol: Vec<String>,
+        /// Restrict to one side.
+        #[arg(long, value_enum)]
+        side: Option<SideArg>,
+        /// Pagination cursor from a previous page.
+        #[arg(long)]
+        cursor: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -192,6 +201,15 @@ pub enum OrderCmd {
     Historical {
         #[arg(long)]
         symbol: Vec<String>,
+        /// Start of the query range, Unix epoch milliseconds.
+        #[arg(long)]
+        start_date: Option<i64>,
+        /// End of the query range, Unix epoch milliseconds.
+        #[arg(long)]
+        end_date: Option<i64>,
+        /// Pagination cursor from a previous page.
+        #[arg(long)]
+        cursor: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -212,6 +230,9 @@ pub enum OrderCmd {
         /// Reject if the order would take liquidity.
         #[arg(long)]
         post_only: bool,
+        /// Optional UUID idempotency key (generated if omitted).
+        #[arg(long)]
+        client_order_id: Option<String>,
         /// Confirm the (real) trade.
         #[arg(long)]
         yes: bool,
@@ -225,6 +246,9 @@ pub enum OrderCmd {
         /// Interpret `size` as the quote currency amount.
         #[arg(long)]
         quote: bool,
+        /// Optional UUID idempotency key (generated if omitted).
+        #[arg(long)]
+        client_order_id: Option<String>,
         /// Confirm the (real) trade.
         #[arg(long)]
         yes: bool,
@@ -273,12 +297,30 @@ pub enum TradeCmd {
     /// Public market trades for a symbol.
     All {
         symbol: String,
+        /// Start of the query range, Unix epoch milliseconds.
+        #[arg(long)]
+        start_date: Option<i64>,
+        /// End of the query range, Unix epoch milliseconds.
+        #[arg(long)]
+        end_date: Option<i64>,
+        /// Pagination cursor from a previous page.
+        #[arg(long)]
+        cursor: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
     },
     /// Your own (private) trades for a symbol.
     Mine {
         symbol: String,
+        /// Start of the query range, Unix epoch milliseconds.
+        #[arg(long)]
+        start_date: Option<i64>,
+        /// End of the query range, Unix epoch milliseconds.
+        #[arg(long)]
+        end_date: Option<i64>,
+        /// Pagination cursor from a previous page.
+        #[arg(long)]
+        cursor: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
     },

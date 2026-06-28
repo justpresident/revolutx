@@ -1,0 +1,131 @@
+//! The interactive `cli` shell: unlock the vault once, then run the same
+//! commands the one-shot CLI does — with history and command/symbol autocomplete.
+//!
+//! Each line is tokenized, parsed by the *same* clap grammar (so the shell and
+//! one-shot accept identical commands), adapted to a shared `Command`, and run on
+//! a single reused runtime + unlocked client. Real-trading commands prompt for
+//! confirmation instead of requiring `--yes`.
+
+use std::sync::Arc;
+
+use clap::Parser;
+use revolutx::RevolutXClient;
+use revolutx::commands;
+use rustyline::Editor;
+use rustyline::error::ReadlineError;
+use rustyline::history::DefaultHistory;
+use tokio::runtime::Runtime;
+
+use crate::adapter::{Action, adapt};
+use crate::args::{Command as ArgCommand, GlobalOpts};
+use crate::helper::ReplHelper;
+use crate::human::render;
+use crate::{creds, line, oneshot};
+
+type Res<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// One line of REPL input: a per-line `--json` toggle plus the shared command
+/// grammar. `no_binary_name` so the first token is the command, not argv[0].
+#[derive(Parser)]
+#[command(no_binary_name = true, about = "Run a revolutx command in the shell.")]
+struct ReplLine {
+    /// Print raw JSON for this command.
+    #[arg(long)]
+    json: bool,
+    #[command(subcommand)]
+    command: ArgCommand,
+}
+
+/// Unlocks the vault and runs the interactive shell.
+pub fn run(global: &GlobalOpts) -> Res {
+    // Unlock the vault once (prompts), then reuse the client for the session.
+    let client = creds::client(global, true)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let symbols = runtime.block_on(fetch_symbols(&client));
+
+    let mut editor: Editor<ReplHelper, DefaultHistory> = Editor::new()?;
+    editor.set_helper(Some(ReplHelper::new(symbols)));
+
+    eprintln!("revolutx interactive shell — run a command, `help`, or `exit` (Ctrl-D to quit).");
+    loop {
+        match editor.readline("revolutx> ") {
+            Ok(line) => {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let _ = editor.add_history_entry(line);
+                if matches!(line, "exit" | "quit") {
+                    break;
+                }
+                if let Err(e) = run_line(global, &runtime, &client, line) {
+                    eprintln!("error: {e}");
+                }
+            }
+            // Ctrl-C abandons the current line; Ctrl-D / EOF ends the session.
+            Err(ReadlineError::Interrupted) => {}
+            Err(ReadlineError::Eof) => break,
+            Err(e) => {
+                eprintln!("error: {e}");
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parses and runs one input line.
+fn run_line(global: &GlobalOpts, runtime: &Runtime, client: &RevolutXClient, line: &str) -> Res {
+    let tokens = line::tokenize(line);
+    if tokens.is_empty() {
+        return Ok(());
+    }
+    // Reuse the one-shot grammar; a parse error (incl. `--help`) is reported as-is.
+    let parsed = ReplLine::try_parse_from(tokens).map_err(|e| e.to_string())?;
+    if matches!(
+        parsed.command,
+        ArgCommand::Vault { .. } | ArgCommand::Agent { .. } | ArgCommand::Cli
+    ) {
+        return Err("`vault`, `agent`, and `cli` are not available inside the shell".into());
+    }
+
+    let json = global.json || parsed.json;
+    match adapt(parsed.command)? {
+        Action::Run { command, confirmed } => {
+            if command.is_real_trading() && !confirmed && !confirm()? {
+                println!("cancelled.");
+                return Ok(());
+            }
+            let output = runtime.block_on(commands::execute(client, command))?;
+            println!("{}", render(json, &output)?);
+        }
+        Action::Watch { symbol, interval } => {
+            runtime.block_on(oneshot::watch(json, client, &symbol, interval))?;
+        }
+    }
+    Ok(())
+}
+
+/// Prompts for confirmation of a real-trading command (reads `/dev/tty`).
+fn confirm() -> Res<bool> {
+    Ok(rcypher::cli::read_tty_confirmation(
+        "This is REAL trading. Proceed? [y/N]: ",
+    )?)
+}
+
+/// Fetches the trading-pair symbols for autocomplete; degrades to none on error.
+async fn fetch_symbols(client: &RevolutXClient) -> Arc<[String]> {
+    match client.configuration().pairs().await {
+        Ok(pairs) => {
+            let mut symbols: Vec<String> = pairs.into_keys().collect();
+            symbols.sort();
+            symbols.into()
+        }
+        Err(e) => {
+            eprintln!("(symbol autocomplete unavailable: {e})");
+            Vec::new().into()
+        }
+    }
+}
