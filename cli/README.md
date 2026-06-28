@@ -76,8 +76,9 @@ revolutx> exit
 ```
 
 Real-trading commands prompt for confirmation here instead of needing `--yes`.
-Prefix a line with `--json` for raw JSON. `market watch <SYMBOL>` streams until
-Ctrl-C returns you to the prompt.
+Prefix a line with `--json` for raw JSON. `market watch <SYMBOL>` streams until you
+press **Enter** to return to the prompt. Symbols are hyphenated (`BTC-USD`), and
+Tab-completion offers the valid ones.
 
 ## Signing agent (headless / no-TTY clients)
 

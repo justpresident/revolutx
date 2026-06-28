@@ -7,6 +7,7 @@
 //! confirmation instead of requiring `--yes`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use revolutx::RevolutXClient;
@@ -20,7 +21,7 @@ use crate::adapter::{Action, adapt};
 use crate::args::{Command as ArgCommand, GlobalOpts};
 use crate::helper::ReplHelper;
 use crate::human::render;
-use crate::{creds, line, oneshot};
+use crate::{creds, line};
 
 type Res<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -101,11 +102,55 @@ fn run_line(global: &GlobalOpts, runtime: &Runtime, client: &RevolutXClient, lin
             let output = runtime.block_on(commands::execute(client, command))?;
             println!("{}", render(json, &output)?);
         }
-        Action::Watch { symbol, interval } => {
-            runtime.block_on(oneshot::watch(json, client, &symbol, interval))?;
-        }
+        Action::Watch { symbol, interval } => run_watch(json, runtime, client, &symbol, interval),
     }
     Ok(())
+}
+
+/// `market watch` in the shell: poll-and-render until the user presses **Enter**.
+///
+/// Ctrl-C is deliberately not the stop key — under ptrace protection a real SIGINT
+/// would kill the watchdog parent and orphan the shell (which is why `main`
+/// ignores SIGINT for the `cli` command). A background thread reads one line and
+/// signals the poll loop to stop.
+fn run_watch(json: bool, runtime: &Runtime, client: &RevolutXClient, symbol: &str, interval: u64) {
+    println!("watching {symbol} — press Enter to stop.");
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_line(&mut buf);
+        let _ = tx.send(());
+    });
+
+    let interval = interval.max(1);
+    runtime.block_on(async move {
+        let poll = async {
+            loop {
+                let command = commands::Command::OrderBook {
+                    symbol: symbol.to_owned(),
+                    limit: None,
+                };
+                match commands::execute(client, command).await {
+                    Ok(output) => {
+                        if !json {
+                            println!("--- {symbol} ---");
+                        }
+                        match render(json, &output) {
+                            Ok(text) => println!("{text}"),
+                            Err(e) => eprintln!("watch: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("watch: {e}"),
+                }
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+            }
+        };
+        tokio::select! {
+            () = poll => {}
+            _ = rx => {}
+        }
+    });
+    let _ = reader.join();
 }
 
 /// Prompts for confirmation of a real-trading command (reads `/dev/tty`).
@@ -116,11 +161,18 @@ fn confirm() -> Res<bool> {
 }
 
 /// Fetches the trading-pair symbols for autocomplete; degrades to none on error.
+///
+/// The pairs map is keyed in slash form (`BTC/USD`), but every endpoint takes the
+/// hyphenated symbol (`BTC-USD`), so build that from each pair's base/quote.
 async fn fetch_symbols(client: &RevolutXClient) -> Arc<[String]> {
     match client.configuration().pairs().await {
         Ok(pairs) => {
-            let mut symbols: Vec<String> = pairs.into_keys().collect();
+            let mut symbols: Vec<String> = pairs
+                .values()
+                .map(|p| format!("{}-{}", p.base, p.quote))
+                .collect();
             symbols.sort();
+            symbols.dedup();
             symbols.into()
         }
         Err(e) => {

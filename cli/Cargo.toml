@@ -29,6 +29,9 @@ revolutx = { path = "..", version = "0.2", features = ["rest", "keystore", "agen
 # the multi-factor unlock loop). The on-disk vault is rcypher's standard format.
 rcypher = { version = "0.3", default-features = false, features = ["storage", "cli"] }
 clap = { version = "4", features = ["derive"] }
+# A `sigprocmask` to block SIGINT for the interactive shell, so Ctrl-C doesn't
+# trip the ptrace-protection watchdog (the shell stops `watch` with Enter).
+libc = "0.2"
 # Interactive shell line editor (the `cli` command): history, editing, and
 # command/symbol autocomplete.
 rustyline = "18"

@@ -38,10 +38,13 @@ impl Presenter for HumanPresenter {
                 }
             }
             CommandOutput::Pairs(pairs) => {
-                for (k, p) in sorted(pairs) {
+                for (_, p) in sorted(pairs) {
+                    // Show the hyphenated symbol the endpoints accept (the map key
+                    // is the slash form), so it's the obvious thing to copy.
+                    let symbol = format!("{}-{}", p.base, p.quote);
                     lines.push(format!(
-                        "{:<12} {}/{}  min {} max {} {:?}",
-                        k, p.base, p.quote, p.min_order_size, p.max_order_size, p.status
+                        "{symbol:<12} min {} max {} {:?}",
+                        p.min_order_size, p.max_order_size, p.status
                     ));
                 }
             }

@@ -49,6 +49,16 @@ fn main() -> ExitCode {
 
     // Harden before any threads/runtime exist (the fork happens here).
     if command.needs_secrets() && !global.insecure_allow_debugging {
+        // The interactive shell must survive Ctrl-C (it stops `watch` with Enter,
+        // not a signal). BLOCK SIGINT *before* the ptrace-protection fork: a SIGINT
+        // delivered to the traced child triggers a ptrace signal-delivery-stop,
+        // which the watchdog parent treats as an attack and kills the child —
+        // orphaning the shell. Blocking prevents delivery (so no stop), and the
+        // parent's `waitpid` is likewise uninterrupted. Inherited by both fork
+        // halves. (Ignoring the signal is not enough — the stop happens first.)
+        if matches!(&command, Command::Cli) {
+            block_sigint();
+        }
         if revolutx::keystore::enable_ptrace_protection().is_err() {
             eprintln!(
                 "error: a debugger/tracer is attached (ptrace protection failed); \
@@ -104,4 +114,20 @@ fn finish(result: Result<(), Box<dyn std::error::Error>>) -> ExitCode {
 fn fail(e: &dyn std::error::Error) -> ExitCode {
     eprintln!("error: {e}");
     ExitCode::FAILURE
+}
+
+/// Blocks SIGINT for this process and any later fork, so Ctrl-C neither
+/// interrupts the ptrace-protection watchdog parent nor triggers a ptrace
+/// signal-delivery-stop that would have it kill the (traced) child. The
+/// interactive shell stops `watch` with Enter, and rustyline reads Ctrl-C as a
+/// keystroke (raw mode), so no real SIGINT is needed.
+fn block_sigint() {
+    // SAFETY: sigprocmask and the sigset ops are async-signal-safe; we are
+    // single-threaded and pre-runtime here. `sigemptyset` initializes the set.
+    unsafe {
+        let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        libc::sigemptyset(set.as_mut_ptr());
+        libc::sigaddset(set.as_mut_ptr(), libc::SIGINT);
+        libc::sigprocmask(libc::SIG_BLOCK, set.as_ptr(), std::ptr::null_mut());
+    }
 }
