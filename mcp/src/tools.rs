@@ -1,4 +1,6 @@
-//! MCP tool definitions and dispatch onto the `revolutx` SDK.
+//! MCP tool definitions and their mapping onto the shared `revolutx::commands`
+//! layer — the same dispatcher and JSON the CLI runs, so all three surfaces parse
+//! and execute identically and differ only in presentation.
 //!
 //! Every tool is forwarded to the signing agent, which is the single
 //! authoritative gate: it refuses all requests until the session has
@@ -12,8 +14,8 @@ use std::str::FromStr;
 use revolutx::api::market_data::{CandleInterval, CandlesQuery};
 use revolutx::api::orders::{ActiveOrdersQuery, HistoricalOrdersQuery};
 use revolutx::api::trades::TradesQuery;
-use revolutx::{ClientOrderId, Decimal, OrderId, RevolutXClient, Side};
-use serde::Serialize;
+use revolutx::commands::{Command, PlaceLimit, PlaceMarket};
+use revolutx::{ClientOrderId, Decimal, OrderId, Side};
 use serde_json::{Value, json};
 
 /// Tool name: authenticate the session with the agent's one-time token. The
@@ -24,7 +26,7 @@ pub const AUTHENTICATE: &str = "authenticate";
 pub const ARG_TOKEN: &str = "token";
 
 // Tool names — the single source of truth for each tool's catalog entry
-// (`list`) and its dispatch arm (`call`).
+// (`list`) and its `to_command` mapping arm.
 const GET_BALANCES: &str = "get_balances";
 const GET_CURRENCIES: &str = "get_currencies";
 const GET_PAIRS: &str = "get_pairs";
@@ -226,145 +228,82 @@ pub fn list() -> Vec<Value> {
     tools
 }
 
-/// Executes a tool call, returning the text payload on success or a
-/// human-readable error message on failure. The signing agent enforces both the
-/// authentication gate and the trading gate, so failures (including "authenticate
-/// first" and "trading is disabled") surface here as the agent's error message.
+/// Builds the shared [`Command`] for a tool call, or a human-readable error for a
+/// bad argument or unknown tool. The server runs it via `revolutx::commands::execute`
+/// and presents the result as JSON. The signing agent stays the authoritative gate —
+/// its "authenticate first" / "trading is disabled" refusals surface as the command's
+/// error.
 // A flat dispatch over tool names; `side`/`size` are both core order terms.
 #[allow(clippy::too_many_lines, clippy::similar_names)]
-pub async fn call(client: &RevolutXClient, name: &str, args: &Value) -> Result<String, String> {
-    match name {
-        // --- read-only ------------------------------------------------------
-        GET_BALANCES => ok_json(&sdk(client.balances().get_all().await)?),
-        GET_CURRENCIES => ok_json(&sdk(client.configuration().currencies().await)?),
-        GET_PAIRS => ok_json(&sdk(client.configuration().pairs().await)?),
-        GET_TICKERS => {
-            let symbols = opt_str_vec(args, "symbols");
-            let tickers = if symbols.is_empty() {
-                sdk(client.market_data().tickers().await)?
-            } else {
-                sdk(client.market_data().tickers_for(&symbols).await)?
-            };
-            ok_json(&tickers)
-        }
-        GET_ORDER_BOOK => {
-            let symbol = req_str(args, "symbol")?;
-            let book = match opt_u32(args, "limit") {
-                Some(limit) => sdk(client
-                    .market_data()
-                    .order_book_with_limit(&symbol, limit)
-                    .await)?,
-                None => sdk(client.market_data().order_book(&symbol).await)?,
-            };
-            ok_json(&book)
-        }
-        GET_PUBLIC_ORDER_BOOK => {
-            let symbol = req_str(args, "symbol")?;
-            ok_json(&sdk(client.market_data().public_order_book(&symbol).await)?)
-        }
-        GET_CANDLES => {
-            let symbol = req_str(args, "symbol")?;
-            let query = CandlesQuery {
+pub fn to_command(name: &str, args: &Value) -> Result<Command, String> {
+    Ok(match name {
+        GET_BALANCES => Command::Balances,
+        GET_CURRENCIES => Command::Currencies,
+        GET_PAIRS => Command::Pairs,
+        GET_TICKERS => Command::Tickers {
+            symbols: opt_str_vec(args, "symbols"),
+        },
+        GET_ORDER_BOOK => Command::OrderBook {
+            symbol: req_str(args, "symbol")?,
+            limit: opt_u32(args, "limit"),
+        },
+        GET_PUBLIC_ORDER_BOOK => Command::PublicOrderBook {
+            symbol: req_str(args, "symbol")?,
+        },
+        GET_CANDLES => Command::Candles {
+            symbol: req_str(args, "symbol")?,
+            query: CandlesQuery {
                 interval: opt_candle_interval(args)?,
                 since: opt_i64(args, "since"),
                 until: opt_i64(args, "until"),
-            };
-            ok_json(&sdk(client.market_data().candles(&symbol, &query).await)?)
-        }
-        GET_LAST_TRADES => ok_json(&sdk(client.market_data().last_trades().await)?),
-        GET_ALL_TRADES => {
-            let symbol = req_str(args, "symbol")?;
-            ok_json(&sdk(client
-                .trades()
-                .all(&symbol, &trades_query(args))
-                .await)?)
-        }
-        GET_PRIVATE_TRADES => {
-            let symbol = req_str(args, "symbol")?;
-            ok_json(&sdk(client
-                .trades()
-                .private(&symbol, &trades_query(args))
-                .await)?)
-        }
-        GET_ACTIVE_ORDERS => {
-            let query = ActiveOrdersQuery {
-                symbols: opt_str_vec(args, "symbols"),
-                side: opt_side(args)?,
-                cursor: opt_str(args, "cursor"),
-                limit: opt_u32(args, "limit"),
-                ..Default::default()
-            };
-            ok_json(&sdk(client.orders().active(&query).await)?)
-        }
-        GET_HISTORICAL_ORDERS => {
-            let query = HistoricalOrdersQuery {
-                symbols: opt_str_vec(args, "symbols"),
-                start_date: opt_i64(args, "start_date"),
-                end_date: opt_i64(args, "end_date"),
-                cursor: opt_str(args, "cursor"),
-                limit: opt_u32(args, "limit"),
-                ..Default::default()
-            };
-            ok_json(&sdk(client.orders().historical(&query).await)?)
-        }
-        GET_ORDER => {
-            let id = OrderId::new(req_str(args, "order_id")?);
-            ok_json(&sdk(client.orders().get(&id).await)?)
-        }
-        GET_ORDER_FILLS => {
-            let id = OrderId::new(req_str(args, "order_id")?);
-            ok_json(&sdk(client.orders().fills(&id).await)?)
-        }
-
-        // --- order mutation (gated) ----------------------------------------
-        PLACE_LIMIT_ORDER => {
-            let symbol = req_str(args, "symbol")?;
-            let side = req_side(args)?;
-            let size = req_decimal(args, "size")?;
-            let price = req_decimal(args, "price")?;
-            let in_quote = opt_bool(args, "size_in_quote").unwrap_or(false);
-            let mut builder = match (side, in_quote) {
-                (Side::Buy, false) => client.orders().limit_buy(symbol, size, price),
-                (Side::Buy, true) => client.orders().limit_buy_quote(symbol, size, price),
-                (Side::Sell, false) => client.orders().limit_sell(symbol, size, price),
-                (Side::Sell, true) => client.orders().limit_sell_quote(symbol, size, price),
-            };
-            if opt_bool(args, "post_only").unwrap_or(false) {
-                builder = builder.post_only();
-            }
-            if let Some(coid) = opt_client_order_id(args)? {
-                builder = builder.client_order_id(coid);
-            }
-            ok_json(&sdk(builder.send().await)?)
-        }
-        PLACE_MARKET_ORDER => {
-            let symbol = req_str(args, "symbol")?;
-            let side = req_side(args)?;
-            let size = req_decimal(args, "size")?;
-            let in_quote = opt_bool(args, "size_in_quote").unwrap_or(false);
-            let mut builder = match (side, in_quote) {
-                (Side::Buy, false) => client.orders().market_buy(symbol, size),
-                (Side::Buy, true) => client.orders().market_buy_quote(symbol, size),
-                (Side::Sell, false) => client.orders().market_sell(symbol, size),
-                (Side::Sell, true) => client.orders().market_sell_quote(symbol, size),
-            };
-            if let Some(coid) = opt_client_order_id(args)? {
-                builder = builder.client_order_id(coid);
-            }
-            ok_json(&sdk(builder.send().await)?)
-        }
-        CANCEL_ORDER => {
-            let id = OrderId::new(req_str(args, "order_id")?);
-            sdk(client.orders().cancel(&id).await)?;
-            ok_json(&json!({ "status": "cancelled", "order_id": id.as_str() }))
-        }
-        CANCEL_ALL_ORDERS => {
-            sdk(client.orders().cancel_all().await)?;
-            ok_json(&json!({ "status": "all_cancelled" }))
-        }
-
-        other => Err(format!("unknown tool: {other}")),
-    }
+            },
+        },
+        GET_LAST_TRADES => Command::LastTrades,
+        GET_ALL_TRADES => Command::AllTrades {
+            symbol: req_str(args, "symbol")?,
+            query: trades_query(args),
+        },
+        GET_PRIVATE_TRADES => Command::PrivateTrades {
+            symbol: req_str(args, "symbol")?,
+            query: trades_query(args),
+        },
+        GET_ACTIVE_ORDERS => Command::ActiveOrders(ActiveOrdersQuery {
+            symbols: opt_str_vec(args, "symbols"),
+            side: opt_side(args)?,
+            cursor: opt_str(args, "cursor"),
+            limit: opt_u32(args, "limit"),
+            ..Default::default()
+        }),
+        GET_HISTORICAL_ORDERS => Command::HistoricalOrders(HistoricalOrdersQuery {
+            symbols: opt_str_vec(args, "symbols"),
+            start_date: opt_i64(args, "start_date"),
+            end_date: opt_i64(args, "end_date"),
+            cursor: opt_str(args, "cursor"),
+            limit: opt_u32(args, "limit"),
+            ..Default::default()
+        }),
+        GET_ORDER => Command::GetOrder(OrderId::new(req_str(args, "order_id")?)),
+        GET_ORDER_FILLS => Command::OrderFills(OrderId::new(req_str(args, "order_id")?)),
+        PLACE_LIMIT_ORDER => Command::PlaceLimit(PlaceLimit {
+            symbol: req_str(args, "symbol")?,
+            side: req_side(args)?,
+            size: req_decimal(args, "size")?,
+            price: req_decimal(args, "price")?,
+            in_quote: opt_bool(args, "size_in_quote").unwrap_or(false),
+            post_only: opt_bool(args, "post_only").unwrap_or(false),
+            client_order_id: opt_client_order_id(args)?,
+        }),
+        PLACE_MARKET_ORDER => Command::PlaceMarket(PlaceMarket {
+            symbol: req_str(args, "symbol")?,
+            side: req_side(args)?,
+            size: req_decimal(args, "size")?,
+            in_quote: opt_bool(args, "size_in_quote").unwrap_or(false),
+            client_order_id: opt_client_order_id(args)?,
+        }),
+        CANCEL_ORDER => Command::Cancel(OrderId::new(req_str(args, "order_id")?)),
+        CANCEL_ALL_ORDERS => Command::CancelAll,
+        other => return Err(format!("unknown tool: {other}")),
+    })
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -415,15 +354,6 @@ fn trades_query(args: &Value) -> TradesQuery {
         cursor: opt_str(args, "cursor"),
         limit: opt_u32(args, "limit"),
     }
-}
-
-/// Maps a `revolutx` SDK result into the tool error channel (a `String`).
-fn sdk<T>(result: revolutx::Result<T>) -> Result<T, String> {
-    result.map_err(|e| e.to_string())
-}
-
-fn ok_json<T: Serialize>(value: &T) -> Result<String, String> {
-    serde_json::to_string_pretty(value).map_err(|e| e.to_string())
 }
 
 fn req_str(args: &Value, key: &str) -> Result<String, String> {
@@ -503,29 +433,12 @@ fn opt_client_order_id(args: &Value) -> Result<Option<ClientOrderId>, String> {
 }
 
 fn opt_candle_interval(args: &Value) -> Result<Option<CandleInterval>, String> {
-    let Some(minutes) = opt_i64(args, "interval_minutes") else {
-        return Ok(None);
-    };
-    let interval = match minutes {
-        1 => CandleInterval::OneMinute,
-        5 => CandleInterval::FiveMinutes,
-        15 => CandleInterval::FifteenMinutes,
-        30 => CandleInterval::ThirtyMinutes,
-        60 => CandleInterval::OneHour,
-        240 => CandleInterval::FourHours,
-        1440 => CandleInterval::OneDay,
-        2880 => CandleInterval::TwoDays,
-        5760 => CandleInterval::FourDays,
-        10080 => CandleInterval::OneWeek,
-        20160 => CandleInterval::TwoWeeks,
-        40320 => CandleInterval::FourWeeks,
-        other => {
-            return Err(format!(
-                "invalid interval_minutes {other}; allowed: 1,5,15,30,60,240,1440,2880,5760,10080,20160,40320"
-            ));
-        }
-    };
-    Ok(Some(interval))
+    // Reuse the shared minutes→interval mapping so it lives in one place.
+    opt_i64(args, "interval_minutes").map_or(Ok(None), |minutes| {
+        revolutx::commands::candle_interval(minutes)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -589,5 +502,36 @@ mod tests {
         assert_eq!(req_side(&json!({ "side": "sell" })).unwrap(), Side::Sell);
         assert!(req_side(&json!({ "side": "hodl" })).is_err());
         assert_eq!(opt_side(&json!({})).unwrap(), None);
+    }
+
+    #[test]
+    fn to_command_builds_neutral_commands() {
+        // A no-arg read tool.
+        assert!(matches!(
+            to_command(GET_BALANCES, &json!({})),
+            Ok(Command::Balances)
+        ));
+        // A trading tool: every required field is threaded through.
+        let limit = to_command(
+            PLACE_LIMIT_ORDER,
+            &json!({ "symbol": "BTC-USD", "side": "buy", "size": "0.1", "price": "50000" }),
+        )
+        .unwrap();
+        match limit {
+            Command::PlaceLimit(o) => {
+                assert_eq!(o.symbol, "BTC-USD");
+                assert_eq!(o.side, Side::Buy);
+                assert!(!o.post_only);
+            }
+            other => panic!("expected PlaceLimit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_command_rejects_missing_and_unknown() {
+        // A required argument missing → Err, not a malformed command.
+        assert!(to_command(GET_ORDER_BOOK, &json!({})).is_err());
+        // An unrecognized tool name → Err.
+        assert!(to_command("get_nothing", &json!({})).is_err());
     }
 }

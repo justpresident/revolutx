@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use revolutx::agent::{AgentExecutor, default_socket_path};
+use revolutx::commands::{JsonPresenter, Presenter};
 use revolutx::{RequestExecutor, RevolutXClient};
 use serde_json::{Value, json};
 
@@ -149,15 +150,23 @@ impl Server {
             .unwrap_or_else(|| json!({}));
 
         // `authenticate` is handled here (it acts on the agent connection, which
-        // tools::call does not see); every other tool is forwarded, and the agent
-        // enforces both the auth gate and the trading gate.
+        // the shared command layer does not see); every other tool maps to a
+        // `Command`, runs through the shared dispatcher, and is presented as JSON —
+        // the same path the CLI uses. The agent still enforces both gates.
         if name == tools::AUTHENTICATE {
             return self.authenticate(id, &args).await;
         }
 
-        match tools::call(&self.client, name, &args).await {
-            Ok(text) => success(id, tool_content(text, false)),
-            Err(message) => success(id, tool_content(message, true)),
+        let command = match tools::to_command(name, &args) {
+            Ok(command) => command,
+            Err(message) => return success(id, tool_content(message, true)),
+        };
+        match revolutx::commands::execute(&self.client, command).await {
+            Ok(output) => match JsonPresenter.present(&output) {
+                Ok(text) => success(id, tool_content(text, false)),
+                Err(e) => success(id, tool_content(e.to_string(), true)),
+            },
+            Err(e) => success(id, tool_content(e.to_string(), true)),
         }
     }
 
