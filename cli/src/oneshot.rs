@@ -20,7 +20,8 @@ pub async fn run(global: &GlobalOpts, command: Command, client: &RevolutXClient)
     // Resolve `?` before any await so the non-`Send` error temporary isn't held
     // across an await point (keeps the future `Send`).
     let action = adapt(command)?;
-    let access: revolutx::AccessLevel = global.access.into();
+    // Direct CLI commands default to `view`: every read works without `--access`.
+    let access = global.access_or(revolutx::AccessLevel::View);
     match action {
         Action::Run { command, confirmed } => {
             // The agent is the real trust boundary; this local gate just lets the

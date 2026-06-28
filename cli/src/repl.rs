@@ -116,7 +116,8 @@ fn run_line(global: &GlobalOpts, runtime: &Runtime, client: &RevolutXClient, lin
     }
 
     let json = global.json || parsed.json;
-    let access: revolutx::AccessLevel = global.access.into();
+    // Same default as the one-shot path: `view`, so reads need no `--access`.
+    let access = global.access_or(revolutx::AccessLevel::View);
     match adapt(parsed.command)? {
         Action::Run { command, confirmed } => {
             // Same local rehearsal gate as the one-shot path (the agent is the real

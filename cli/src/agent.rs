@@ -83,7 +83,8 @@ fn start(
         move || connected.store(true, Ordering::Relaxed)
     };
 
-    let access: revolutx::AccessLevel = global.access.into();
+    // An exposed client gets least privilege by default: market data only.
+    let access = global.access_or(revolutx::AccessLevel::Market);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

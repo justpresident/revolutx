@@ -94,8 +94,11 @@ revolutx agent start --auth-token --idle-timeout 600  # exit if no client authen
 revolutx agent start --auth-token --idle-timeout 0    # never auto-lock before authenticating
 ```
 
-`--access` sets the capability tier the agent serves (the global flag also gates
-ordinary CLI commands locally, so you can rehearse a policy without an agent):
+`--access` sets the capability tier the agent serves. It is **optional**: `agent
+start` defaults to `market` (least privilege for an exposed client), while direct
+CLI commands default to `view` (every read works without the flag — pass `--access
+trading` to place orders directly, or a lower tier to rehearse an agent policy
+locally). The tiers are cumulative:
 
 | tier              | allows                                                              |
 | ----------------- | ------------------------------------------------------------------ |

@@ -33,18 +33,31 @@ pub struct GlobalOpts {
     /// traced hosts).
     #[arg(long, global = true)]
     pub insecure_allow_debugging: bool,
-    /// Capability tier this session may use (cumulative; default: market).
+    /// Capability tier this session may use (cumulative). Optional — you do not
+    /// need it for everyday use: direct CLI commands default to `view` (every read
+    /// works without it), while `revolutx agent start` defaults to `market` (least
+    /// privilege for a client it exposes). Pass it to widen (`--access trading` to
+    /// place orders directly) or to rehearse a tighter agent policy locally.
     ///
     /// `market` allows only public market data and exchange reference data
-    /// (tickers, order books, candles, public trades, currencies, pairs).
-    /// `view` adds read-only account data (balances, your orders and trades,
-    /// fills). `trading` adds placing, replacing, and cancelling orders.
-    /// `revolutx agent start` serves clients at this tier and enforces it as the
-    /// authoritative gate; for ordinary commands the CLI applies the same gate
-    /// locally, so you can rehearse an agent policy. Order placement still needs
-    /// per-command --yes/confirmation on top of `trading`.
-    #[arg(long, global = true, value_enum, default_value_t = AccessArg::Market)]
-    pub access: AccessArg,
+    /// (tickers, order books, candles, public trades, currencies, pairs). `view`
+    /// adds read-only account data (balances, your orders and trades, fills).
+    /// `trading` adds placing, replacing, and cancelling orders. The agent enforces
+    /// this as its authoritative gate; for direct commands the CLI applies the same
+    /// gate locally. Order placement still needs per-command --yes/confirmation on
+    /// top of `trading`.
+    #[arg(long, global = true, value_enum)]
+    pub access: Option<AccessArg>,
+}
+
+impl GlobalOpts {
+    /// The session's [`AccessLevel`](revolutx::AccessLevel), falling back to
+    /// `default` when `--access` was not given. Direct CLI commands pass `View` so
+    /// reads work without the flag; `agent start` passes `Market` so an exposed
+    /// client gets least privilege.
+    pub fn access_or(&self, default: revolutx::AccessLevel) -> revolutx::AccessLevel {
+        self.access.map_or(default, Into::into)
+    }
 }
 
 #[derive(Copy, Clone, ValueEnum)]
