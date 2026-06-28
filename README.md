@@ -41,7 +41,7 @@ automatically with Ed25519, and never represents money or quantities as `f64`
 
 ```toml
 [dependencies]
-revolutx = "0.2"
+revolutx = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -53,6 +53,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 | `fix` | — | FIX 4.4 client (market data + trading). **Reserved, not yet implemented.** |
 | `keystore` | — | Encrypted credential vault exposed as a `Signer`, stored in [`rcypher`]'s multi-factor `SecretStore` format (Argon2id + AES-256-CBC + HMAC; password and/or FIDO2; manageable with the `rcypher` CLI). Implies `rest`. |
 | `agent` | — | Signing-agent proxy (unix-only): a `serve()` daemon plus an `AgentExecutor` client, so a headless process can delegate signing + HTTP to an agent that holds the keystore. Implies `rest`. |
+| `commands` | — | High-level command layer: a parse-neutral `Command` model, one `execute` dispatcher, a structured `CommandOutput`, and a `Presenter` seam (with a shared `JsonPresenter`), so a surface differs only in input parsing and output presentation. Adds no dependencies. Implies `rest`. |
 
 [`rcypher`]: https://crates.io/crates/rcypher
 
@@ -61,7 +62,7 @@ A FIX-only consumer (e.g. a market maker) can drop the HTTP/TLS dependency tree
 entirely:
 
 ```toml
-revolutx = { version = "0.2", default-features = false, features = ["fix"] }
+revolutx = { version = "0.3", default-features = false, features = ["fix"] }
 ```
 
 ## Generating an API key

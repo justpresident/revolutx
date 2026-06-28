@@ -6,21 +6,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-28
+
+Builds three consistent surfaces on the 0.2 SDK — a shared command layer, an
+interactive CLI shell, and an MCP server — hardens the signing agent with peer
+authentication, and replaces the agent's trading on/off switch with a
+`market | view | trading` access ladder.
+
 ### Added
 
 - **Shared command layer** (`commands` feature, opt-in): a parse-neutral
   `Command` model, a single `execute` dispatcher onto a `RevolutXClient`, a
   structured `CommandOutput` (serializes to the bare SDK response), and a
-  `Presenter` seam with a shared `JsonPresenter`. Adds no dependencies. The CLI
-  one-shot path and the new interactive shell run on it; the MCP can adopt it
-  next so all three parse/dispatch identically and differ only in presentation.
+  `Presenter` seam with a shared `JsonPresenter`. Adds no dependencies. All three
+  surfaces — the CLI one-shot path, the interactive shell, and the MCP — parse and
+  dispatch through it and differ only in presentation.
 - **`revolutx cli` interactive shell**: unlocks the vault once, then a REPL
   running the same commands with history, line editing, and Tab-completion of
   commands and trading symbols. Real-trading commands prompt for confirmation
   instead of requiring `--yes`; `market watch` streams until Ctrl-C.
+- **Signing-agent peer authentication.** The agent authenticates the connecting
+  peer with a one-time, high-entropy token before exposing the signing oracle,
+  closing the gap where another same-UID process could race to the `0600` socket
+  and trade as you. `AuthToken` (generate / constant-time verify) is exported from
+  the `agent` feature.
+- **`--access market | view | trading` capability tiers** (`revolutx::access`): a
+  cumulative ladder — `market` (public market data only), `view` (adds read-only
+  account data: balances, your orders/trades, fills), `trading` (adds order
+  placement and cancellation). `revolutx agent start --access` sets the tier the
+  agent serves and enforces as the authoritative gate (default `market`, least
+  privilege); `revolutx cli --access` gates the shell locally (default `view`) so
+  an agent policy can be rehearsed. Out-of-tier requests are refused with a message
+  naming the tier needed. One-shot CLI commands are run by the credential owner and
+  are not gated.
 - CLI parity flags so its commands match the shared model: `--side`/`--cursor` on
   `orders active`, dates + `--cursor` on `orders historical` and `trades`, and
-  `--client-order-id` on `orders limit`/`market`.
+  `--client-order-id` on `orders limit`/`market`. Date/time flags accept human
+  forms (`2024-01-31`, `"2024-01-31 14:30"`, `7d`, RFC 3339) as well as epoch
+  milliseconds.
 
 ### Changed
 
@@ -34,40 +57,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read; re-run `revolutx vault init`.
 - `revolutx-cli` gains a default-on `fido2` feature (`--no-default-features` for
   hosts without `libudev`/`hidapi`); vault unlock now drives rcypher's interactive
-  multi-factor loop (password and/or security key). `KeystoreOptions` is removed —
-  the vault cipher's trace-detection is rcypher's (it allows the hardening
-  watchdog and refuses only a foreign debugger), so `--insecure-allow-debugging`
-  no longer toggles it.
+  multi-factor loop (password and/or security key).
 - `generate_key_pair` / `GeneratedKeyPair` moved from the `keystore` feature to
   `rest` (they are pure Ed25519, no rcypher), so generating a signing key no
   longer pulls the encrypted-vault stack. It now returns `Error::KeyGeneration`.
-
-### Added
-
-- **Signing-agent peer authentication.** The agent now authenticates the
-  connecting peer with a one-time, high-entropy token before exposing the signing
-  oracle, closing the gap where another same-UID process could race to the
-  `0600` socket and trade as you. `AuthToken` (generate / constant-time verify) is
-  exported from the `agent` feature.
-
-### Changed
-
 - The agent accepts connections **concurrently** and holds each unauthenticated:
   the only request an unauthenticated peer may issue is `Authenticate`, and the
   token is consumed on first valid use, so exactly one client can authenticate.
-  Capabilities (base URL, trading policy) are revealed only in the authentication
+  Its capabilities (base URL, access tier) are revealed only in the authentication
   reply — an unauthenticated peer learns nothing. `on_connect` (the watchdog's
   idle-lock cancel) fires on authentication, not on TCP accept.
 - `revolutx agent start` requires `--auth-token`: it prints the one-time token for
   the operator to hand to the client out of band (never accepted as an argument
   value, which would expose it via `/proc` and `ps`).
-- `revolutx-mcp` exposes an `authenticate` tool: the LLM must call it with the
-  agent's token before any other tool works. Order-mutating tools are now always
-  advertised (the agent remains the authoritative trading gate).
+- **`revolutx-mcp` runs on the shared command layer and connects to the agent
+  lazily.** Each tool maps onto a shared `Command`, dispatched through `execute` +
+  `JsonPresenter` (byte-identical JSON to the CLI `--json`). The server no longer
+  connects at startup: it opens the socket only when the `authenticate` tool is
+  called, and reconnects on each call — so the agent can be started, stopped, or
+  restarted independently, and the client just re-runs `authenticate` with the new
+  token. All tools are advertised unconditionally; the agent enforces the
+  `--access` gate.
 - MSRV is **1.87** (the `Cargo.toml` `rust-version`): the `keystore`/`agent`
   features depend on `rcypher`, which uses `const fn` over `Vec::len` (stable
   since Rust 1.87). 0.2.0 shipped declaring `1.85` by mistake — it does not build
   on 1.85 with those features.
+
+### Removed
+
+- The agent's `--enable-trading` flag, superseded by `--access trading` (the tier
+  ladder also gates account reads behind `--access view`, which the boolean did
+  not).
+- `KeystoreOptions` — the vault cipher's trace-detection is now rcypher's (it
+  allows the hardening watchdog and refuses only a foreign debugger), so
+  `--insecure-allow-debugging` no longer toggles it.
 
 ## [0.2.0] - 2026-06-22
 
