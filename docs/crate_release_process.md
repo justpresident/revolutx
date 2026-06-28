@@ -3,11 +3,11 @@
 This workspace publishes **three crates to crates.io**, each **versioned and
 tagged independently**:
 
-| Crate          | Manifest         | Tag scheme            | Notes |
-| -------------- | ---------------- | --------------------- | ----- |
-| `revolutx`     | `Cargo.toml`     | `vX.Y.Z`              | the library; the dependency the binaries build on |
-| `revolutx-cli` | `cli/Cargo.toml` | `revolutx-cli-vX.Y.Z` | binary (`cargo install` builds it) |
-| `revolutx-mcp` | `mcp/Cargo.toml` | `revolutx-mcp-vX.Y.Z` | binary (`cargo install` builds it) |
+| Crate          | Manifest         | Changelog          | Tag scheme            | Notes |
+| -------------- | ---------------- | ------------------ | --------------------- | ----- |
+| `revolutx`     | `Cargo.toml`     | `CHANGELOG.md`     | `vX.Y.Z`              | the library; the dependency the binaries build on |
+| `revolutx-cli` | `cli/Cargo.toml` | `cli/CHANGELOG.md` | `revolutx-cli-vX.Y.Z` | binary (`cargo install` builds it) |
+| `revolutx-mcp` | `mcp/Cargo.toml` | `mcp/CHANGELOG.md` | `revolutx-mcp-vX.Y.Z` | binary (`cargo install` builds it) |
 
 Each crate's version lives in **its own `Cargo.toml`** and moves on its own
 cadence — bumping the library does not force a binary bump, and vice versa. The
@@ -60,8 +60,8 @@ What the script does:
 4. **tag + push** — annotated tag on the rebased release commit, then push the
    branch and the tag.
 5. **`cargo publish -p <crate>`** — the irreversible upload.
-6. **`gh release create`** — notes from this version's `CHANGELOG.md` section for
-   the library; a short pointer for the binaries (they share the root changelog).
+6. **`gh release create`** — notes from this version's section of the crate's own
+   changelog (`CHANGELOG.md`, `cli/CHANGELOG.md`, or `mcp/CHANGELOG.md`).
 
 The sections below are the human judgment the script relies on; do them, commit,
 then run the script.
@@ -131,20 +131,29 @@ then run the script.
 
 ## Update the changelog
 
-7. Update `CHANGELOG.md` at the repo root ([Keep a Changelog](https://keepachangelog.com/)
-   format). It is the **library's** changelog and the single source of truth for
-   the library's GitHub release notes; it also narrates the workspace's changes,
-   so a binary release that ships alongside is described here too. From the `git
-   log` review above, turn the `[Unreleased]` section into a dated version
-   section, grouping notable changes under `Added` / `Changed` / `Fixed` /
-   `Removed`. Summarize what users care about, not raw commit subjects.
+7. Update the changelog **for the crate you're releasing** ([Keep a
+   Changelog](https://keepachangelog.com/) format) — each crate keeps its own and
+   versions independently:
+   - `CHANGELOG.md` (repo root) for the `revolutx` library;
+   - `cli/CHANGELOG.md` for `revolutx-cli`;
+   - `mcp/CHANGELOG.md` for `revolutx-mcp`.
+
+   From the `git log` review above (scoped to that crate's directory — e.g. `git
+   log <last-tag>..HEAD -- cli/`), turn the `[Unreleased]` section into a dated
+   version section, grouping notable changes under `Added` / `Changed` / `Fixed` /
+   `Removed`. Summarize what *that crate's* users care about, not raw commit
+   subjects, and keep library-vs-binary changes in their own files (a lib API
+   change goes in the root changelog; the CLI flag or MCP tool that surfaces it
+   goes in the binary's).
    ```markdown
    ## [0.3.0] - 2026-07-01
    ### Changed
    - Credential vault moved to rcypher 0.3's `SecretStore` format …
    ```
-   (`CHANGELOG.md` ships in the published crate — `exclude` only drops the
-   submodule, dev-only files, `scripts/`, and the two submodule-dependent tests.)
+   This section is the single source of truth for that crate's GitHub release
+   notes (the script extracts it). Each `CHANGELOG.md` ships in its own published
+   crate — `exclude` only drops the submodule, dev-only files, `scripts/`, and the
+   two submodule-dependent tests.
 
 ## Bump the versions
 

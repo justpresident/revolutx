@@ -1,8 +1,13 @@
-# Changelog
+# Changelog — revolutx (library)
 
-All notable changes to this project are documented here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+All notable changes to the `revolutx` library are documented here. The format is
+based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+The binaries track their changes in their own changelogs:
+[`cli/CHANGELOG.md`](cli/CHANGELOG.md) (`revolutx-cli`) and
+[`mcp/CHANGELOG.md`](mcp/CHANGELOG.md) (`revolutx-mcp`). Through 0.3.0, library and
+binary changes were logged together in this file.
 
 ## [Unreleased]
 

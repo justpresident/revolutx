@@ -126,22 +126,24 @@ step "cargo publish -p $CRATE"
 cargo publish -p "$CRATE"
 
 # --- GitHub release -----------------------------------------------------------
+# Each crate has its own changelog ("./CHANGELOG.md" for the library,
+# "cli/CHANGELOG.md", "mcp/CHANGELOG.md"); pull this version's section as notes.
 step "gh release create $TAG"
 NOTES="$(mktemp)"
 trap 'rm -f "$NOTES"' EXIT
-if [ "$CRATE" = "revolutx" ]; then
-    # The root CHANGELOG.md is the library's; pull this version's section as notes.
+CHANGELOG="$DIR/CHANGELOG.md"
+if [ -f "$CHANGELOG" ]; then
     awk -v v="$VERSION" '
         $0 ~ "^## \\[" v "\\]" { f = 1; next }
         /^## \[/ { f = 0 }
         f { print }
-    ' CHANGELOG.md > "$NOTES"
+    ' "$CHANGELOG" > "$NOTES"
 fi
 if [ -s "$NOTES" ]; then
     gh release create "$TAG" --title "$TAG" --notes-file "$NOTES"
 else
     gh release create "$TAG" --title "$TAG" \
-        --notes "\`$CRATE\` $VERSION. See CHANGELOG.md and <https://crates.io/crates/$CRATE/$VERSION>."
+        --notes "\`$CRATE\` $VERSION. See $CHANGELOG and <https://crates.io/crates/$CRATE/$VERSION>."
 fi
 
 REPO_URL="$(git remote get-url origin | sed 's#git@github.com:#https://github.com/#; s#\.git$##')"
