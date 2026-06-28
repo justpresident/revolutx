@@ -17,6 +17,7 @@ exclude = [
     ".taska/",
     "AGENTS.md",
     "revolut-openapi/",
+    "scripts/",
     "tests/fixtures.rs",
     "tests/spec_coverage.rs",
 ]
