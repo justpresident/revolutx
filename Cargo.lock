@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "revolutx-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "libc",
@@ -1866,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "revolutx-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "revolutx",
  "serde",
