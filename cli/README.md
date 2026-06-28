@@ -94,15 +94,16 @@ revolutx agent start --auth-token --idle-timeout 600  # exit if no client authen
 revolutx agent start --auth-token --idle-timeout 0    # never auto-lock before authenticating
 ```
 
-`--access` sets the capability tier the agent serves. It is **optional**: `agent
-start` defaults to `market` (least privilege for an exposed client), while direct
-CLI commands default to `view` (every read works without the flag — pass `--access
-trading` to place orders directly, or a lower tier to rehearse an agent policy
-locally). The tiers are cumulative:
+`--access` sets the capability tier the agent serves — the authoritative gate a
+client cannot widen; it defaults to `market` (least privilege). The same flag is
+available on the interactive shell (`revolutx cli --access`, default `view`) so you
+can rehearse a policy locally before handing it to an agent. One-shot direct
+commands (e.g. `revolutx balances`) are run by the credential owner and are not
+gated — they have no `--access` flag. The tiers are cumulative:
 
 | tier              | allows                                                              |
 | ----------------- | ------------------------------------------------------------------ |
-| `market` (default)| public market data + exchange reference (tickers, books, candles, public trades, currencies, pairs) |
+| `market`          | public market data + exchange reference (tickers, books, candles, public trades, currencies, pairs) |
 | `view`            | the above **plus** read-only account data (balances, your orders/trades, fills) |
 | `trading`         | the above **plus** placing, replacing, and cancelling orders (REAL TRADING) |
 

@@ -57,7 +57,7 @@ fn main() -> ExitCode {
         // orphaning the shell. Blocking prevents delivery (so no stop), and the
         // parent's `waitpid` is likewise uninterrupted. Inherited by both fork
         // halves. (Ignoring the signal is not enough — the stop happens first.)
-        if matches!(&command, Command::Cli) {
+        if matches!(&command, Command::Cli { .. }) {
             block_sigint();
         }
         if revolutx::keystore::enable_ptrace_protection().is_err() {
@@ -80,7 +80,7 @@ fn main() -> ExitCode {
         // must be spawned after the fork above, before any runtime).
         Command::Agent { command } => finish(agent::run(&global, command)),
         // The interactive shell unlocks the vault once and owns its own runtime.
-        Command::Cli => finish(repl::run(&global)),
+        Command::Cli { access } => finish(repl::run(&global, access.into())),
         // Every other command is a one-shot over a `RevolutXClient`.
         command => {
             // Resolve credentials (may prompt) before entering the async runtime.

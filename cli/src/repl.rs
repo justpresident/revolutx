@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
-use revolutx::RevolutXClient;
 use revolutx::commands;
+use revolutx::{AccessLevel, RevolutXClient};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
@@ -37,8 +37,10 @@ struct ReplLine {
     command: ArgCommand,
 }
 
-/// Unlocks the vault and runs the interactive shell.
-pub fn run(global: &GlobalOpts) -> Res {
+/// Unlocks the vault and runs the interactive shell at the session's `access`
+/// tier (from `revolutx cli --access`, default `view`), which gates every line so
+/// the shell can rehearse the policy an agent would enforce.
+pub fn run(global: &GlobalOpts, access: AccessLevel) -> Res {
     // Unlock the vault once (prompts), then reuse the client for the session.
     let client = creds::client(global, true)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -66,7 +68,7 @@ pub fn run(global: &GlobalOpts) -> Res {
                 if matches!(line, "exit" | "quit") {
                     break;
                 }
-                if let Err(e) = run_line(global, &runtime, &client, line) {
+                if let Err(e) = run_line(global, access, &runtime, &client, line) {
                     eprintln!("error: {e}");
                 }
             }
@@ -82,8 +84,14 @@ pub fn run(global: &GlobalOpts) -> Res {
     Ok(())
 }
 
-/// Parses and runs one input line.
-fn run_line(global: &GlobalOpts, runtime: &Runtime, client: &RevolutXClient, line: &str) -> Res {
+/// Parses and runs one input line, gated by the session's `access` tier.
+fn run_line(
+    global: &GlobalOpts,
+    access: AccessLevel,
+    runtime: &Runtime,
+    client: &RevolutXClient,
+    line: &str,
+) -> Res {
     let tokens = line::tokenize(line);
     if tokens.is_empty() {
         return Ok(());
@@ -110,18 +118,16 @@ fn run_line(global: &GlobalOpts, runtime: &Runtime, client: &RevolutXClient, lin
     };
     if matches!(
         parsed.command,
-        ArgCommand::Vault { .. } | ArgCommand::Agent { .. } | ArgCommand::Cli
+        ArgCommand::Vault { .. } | ArgCommand::Agent { .. } | ArgCommand::Cli { .. }
     ) {
         return Err("`vault`, `agent`, and `cli` are not available inside the shell".into());
     }
 
     let json = global.json || parsed.json;
-    // Same default as the one-shot path: `view`, so reads need no `--access`.
-    let access = global.access_or(revolutx::AccessLevel::View);
     match adapt(parsed.command)? {
         Action::Run { command, confirmed } => {
-            // Same local rehearsal gate as the one-shot path (the agent is the real
-            // boundary); refuse before prompting for a trade we wouldn't run anyway.
+            // The shell's `--access` tier gates each line so a policy can be
+            // rehearsed; refuse before prompting for a trade we wouldn't run anyway.
             let required = command.min_access();
             if !access.permits(required) {
                 return Err(revolutx::access::access_denied(required, access).into());

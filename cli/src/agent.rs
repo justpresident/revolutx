@@ -37,7 +37,8 @@ pub fn run(global: &GlobalOpts, command: AgentCmd) -> Res<()> {
             socket,
             auth_token,
             idle_timeout,
-        } => start(global, socket, auth_token, idle_timeout),
+            access,
+        } => start(global, socket, auth_token, idle_timeout, access.into()),
     }
 }
 
@@ -46,6 +47,7 @@ fn start(
     socket: Option<PathBuf>,
     auth_token: bool,
     idle_timeout: u64,
+    access: revolutx::AccessLevel,
 ) -> Res<()> {
     // A client can only ever be authenticated with a one-time token, so refuse to
     // start without one — before touching the vault. (Interactive operator
@@ -83,8 +85,6 @@ fn start(
         move || connected.store(true, Ordering::Relaxed)
     };
 
-    // An exposed client gets least privilege by default: market data only.
-    let access = global.access_or(revolutx::AccessLevel::Market);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

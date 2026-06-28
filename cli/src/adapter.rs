@@ -38,7 +38,7 @@ const fn run(command: Command) -> Action {
 /// before this and never reach here.
 pub fn adapt(command: ArgCommand) -> Res<Action> {
     Ok(match command {
-        ArgCommand::Vault { .. } | ArgCommand::Agent { .. } | ArgCommand::Cli => {
+        ArgCommand::Vault { .. } | ArgCommand::Agent { .. } | ArgCommand::Cli { .. } => {
             unreachable!("vault, agent, and cli are handled before adapt")
         }
         ArgCommand::Balances => run(Command::Balances),
