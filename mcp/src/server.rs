@@ -23,8 +23,7 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MISSING_TOKEN: &str = "authenticate requires a 'token' string argument";
 /// Tool error: a tool other than `authenticate` was called before this session has
 /// authenticated with the agent.
-const NOT_AUTHENTICATED: &str =
-    "authenticate first: call the `authenticate` tool with the one-time token from \
+const NOT_AUTHENTICATED: &str = "authenticate first: call the `authenticate` tool with the one-time token from \
      `revolutx agent start --auth-token`";
 
 /// An MCP server that proxies to a `revolutx` signing agent over a unix socket.

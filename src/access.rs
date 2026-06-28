@@ -142,7 +142,10 @@ mod tests {
     fn unknown_get_endpoint_fails_closed_to_view() {
         // An endpoint not on the public allowlist is treated as account data, so a
         // future unclassified read is never leaked at the market tier.
-        assert_eq!(required_access_for("GET", "/some/new/thing"), AccessLevel::View);
+        assert_eq!(
+            required_access_for("GET", "/some/new/thing"),
+            AccessLevel::View
+        );
     }
 
     #[test]

@@ -351,7 +351,9 @@ impl AgentExecutor {
     /// is.
     #[must_use]
     pub fn access(&self) -> AccessLevel {
-        self.caps.get().map_or(AccessLevel::Market, |caps| caps.access)
+        self.caps
+            .get()
+            .map_or(AccessLevel::Market, |caps| caps.access)
     }
 
     /// Checks that the agent is responding (sent over the established
@@ -913,14 +915,14 @@ mod tests {
         assert_eq!(executor.access(), AccessLevel::Market);
 
         // Public market data is allowed.
-        let raw = executor.execute(RequestSpec::get("/tickers")).await.unwrap();
+        let raw = executor
+            .execute(RequestSpec::get("/tickers"))
+            .await
+            .unwrap();
         assert_eq!(raw.body, b"/tickers");
         // Personal account reads are refused at the market tier...
         for path in ["/balances", "/orders/active", "/trades/private/BTC-USD"] {
-            let err = executor
-                .execute(RequestSpec::get(path))
-                .await
-                .unwrap_err();
+            let err = executor.execute(RequestSpec::get(path)).await.unwrap_err();
             assert!(matches!(err, Error::Agent { .. }), "should refuse {path}");
         }
         // ...as is any order mutation.
@@ -971,7 +973,14 @@ mod tests {
         let server = {
             let socket = socket.clone();
             tokio::spawn(async move {
-                serve(Arc::new(EchoExecutor), &socket, AccessLevel::View, token, on_connect).await
+                serve(
+                    Arc::new(EchoExecutor),
+                    &socket,
+                    AccessLevel::View,
+                    token,
+                    on_connect,
+                )
+                .await
             })
         };
         wait_for(&socket).await;
