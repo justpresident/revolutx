@@ -225,3 +225,5 @@
 {"seq":225,"timestamp":"2026-06-28T10:49:27.861619898Z","op":"Update","task_id":"rx-unified-command-layer","status":"closed"}
 {"seq":226,"timestamp":"2026-06-28T19:31:06.190841221Z","op":"Update","task_id":"rx-mcp-shared-commands","status":"in_progress"}
 {"seq":227,"timestamp":"2026-06-28T19:40:46.870980904Z","op":"Update","task_id":"rx-mcp-shared-commands","status":"closed"}
+{"seq":228,"timestamp":"2026-06-28T20:01:17.869793318Z","op":"Create","task_id":"rx-access-tiers","priority":2,"status":"in_progress","task_type":"task","title":"Access tiers: --access market|view|trading gate (agent + CLI), replacing --enable-trading"}
+{"seq":229,"timestamp":"2026-06-28T20:17:24.059759794Z","op":"Update","task_id":"rx-access-tiers","status":"closed"}

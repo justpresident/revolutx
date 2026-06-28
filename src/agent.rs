@@ -52,6 +52,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bincode::{Decode, Encode};
 use reqwest::Method;
+
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -59,6 +60,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use zeroize::Zeroizing;
 
+use crate::access::{AccessLevel, access_denied, required_access_for};
 use crate::error::{Error, Result};
 use crate::transport::{BoxFuture, RawResponse, RequestExecutor, RequestSpec};
 
@@ -193,9 +195,11 @@ pub struct Capabilities {
     /// The base URL the agent targets (it owns the real environment; clients use
     /// this only for display).
     pub base_url: String,
-    /// Whether the agent will execute order-mutating (non-`GET`) requests. The
-    /// agent enforces this regardless of what any client believes.
-    pub trading_enabled: bool,
+    /// The [`AccessLevel`] the agent will serve: which operations it permits
+    /// (market data, account reads, or trading). The agent enforces this
+    /// regardless of what any client believes; it is reported only so a client can
+    /// reflect the policy.
+    pub access: AccessLevel,
 }
 
 /// The wire form of a [`RequestSpec`]: method as a token, plus the path, query,
@@ -312,12 +316,11 @@ impl AgentExecutor {
     }
 
     /// Presents the agent's one-time token. On success the agent reveals its
-    /// [`Capabilities`] (base URL + trading policy), which are cached for
-    /// [`base_url`](RequestExecutor::base_url) and
-    /// [`trading_enabled`](Self::trading_enabled), and the connection becomes
-    /// authenticated. The token is single-use: a second connection presenting it
-    /// is refused. A wrong token returns an error but leaves the connection open
-    /// to retry.
+    /// [`Capabilities`] (base URL + access policy), which are cached for
+    /// [`base_url`](RequestExecutor::base_url) and [`access`](Self::access), and the
+    /// connection becomes authenticated. The token is single-use: a second
+    /// connection presenting it is refused. A wrong token returns an error but
+    /// leaves the connection open to retry.
     pub async fn authenticate(&self, token: &str) -> Result<()> {
         match self
             .round_trip(&AgentRequest::Authenticate(token.to_owned()))
@@ -342,11 +345,13 @@ impl AgentExecutor {
         self.authenticated.load(Ordering::Acquire)
     }
 
-    /// Whether the agent will execute order-mutating requests. Reported by the
-    /// agent on authentication; `false` until then.
+    /// The [`AccessLevel`] the agent will serve, reported on authentication.
+    /// Defaults to the most restrictive ([`Market`](AccessLevel::Market)) until
+    /// then, so an unauthenticated connection never appears more privileged than it
+    /// is.
     #[must_use]
-    pub fn trading_enabled(&self) -> bool {
-        self.caps.get().is_some_and(|caps| caps.trading_enabled)
+    pub fn access(&self) -> AccessLevel {
+        self.caps.get().map_or(AccessLevel::Market, |caps| caps.access)
     }
 
     /// Checks that the agent is responding (sent over the established
@@ -429,9 +434,13 @@ impl RequestExecutor for AgentExecutor {
 /// re-locking the vault; the token is already spent, so no later connection can
 /// authenticate.
 ///
-/// `trading_enabled` is the authoritative order-mutation policy: when `false`,
-/// the agent refuses every non-`GET` request regardless of what the client
-/// believes. It is reported to the client inside the authentication reply.
+/// `access` is the authoritative capability policy: the agent serves only the
+/// operations that tier permits (see [`required_access_for`]) and refuses the
+/// rest regardless of what the client believes — market data at
+/// [`Market`](AccessLevel::Market), account reads additionally at
+/// [`View`](AccessLevel::View), and order mutations only at
+/// [`Trading`](AccessLevel::Trading). It is reported to the client inside the
+/// authentication reply.
 ///
 /// The socket is created with `0600` permissions. If a live agent is already
 /// listening on `socket_path` this returns an error; a stale socket file (no
@@ -439,7 +448,7 @@ impl RequestExecutor for AgentExecutor {
 pub async fn serve(
     executor: Arc<dyn RequestExecutor>,
     socket_path: &Path,
-    trading_enabled: bool,
+    access: AccessLevel,
     token: AuthToken,
     on_connect: impl FnOnce() + Send,
 ) -> Result<()> {
@@ -458,7 +467,7 @@ pub async fn serve(
         listener,
         gate,
         executor,
-        trading_enabled,
+        access,
         Arc::clone(&authenticated),
         Arc::clone(&session_ended),
     ));
@@ -505,7 +514,7 @@ async fn accept_loop(
     listener: UnixListener,
     gate: Arc<tokio::sync::Mutex<Gate>>,
     executor: Arc<dyn RequestExecutor>,
-    trading_enabled: bool,
+    access: AccessLevel,
     authenticated: Arc<Notify>,
     session_ended: Arc<Notify>,
 ) {
@@ -525,7 +534,7 @@ async fn accept_loop(
                 stream,
                 &gate,
                 executor.as_ref(),
-                trading_enabled,
+                access,
                 &authenticated,
                 &session_ended,
             )
@@ -611,7 +620,7 @@ async fn handle_connection(
     mut stream: UnixStream,
     gate: &tokio::sync::Mutex<Gate>,
     executor: &dyn RequestExecutor,
-    trading_enabled: bool,
+    access: AccessLevel,
     authenticated: &Notify,
     session_ended: &Notify,
 ) {
@@ -637,7 +646,7 @@ async fn handle_connection(
                         authenticated.notify_one();
                         let caps = Capabilities {
                             base_url: executor.base_url().to_owned(),
-                            trading_enabled,
+                            access,
                         };
                         if write_frame(&mut stream, &AgentResponse::Authenticated(caps))
                             .await
@@ -670,7 +679,7 @@ async fn handle_connection(
 
         let response = match request {
             AgentRequest::Ping => AgentResponse::Pong,
-            AgentRequest::Execute(wire) => execute_forwarded(executor, wire, trading_enabled).await,
+            AgentRequest::Execute(wire) => execute_forwarded(executor, wire, access).await,
             // Re-authenticating an already-authenticated connection is a no-op.
             AgentRequest::Authenticate(_) => {
                 AgentResponse::Failed(MSG_ALREADY_AUTHENTICATED.to_owned())
@@ -691,19 +700,18 @@ async fn handle_connection(
 async fn execute_forwarded(
     executor: &dyn RequestExecutor,
     wire: WireRequest,
-    trading_enabled: bool,
+    access: AccessLevel,
 ) -> AgentResponse {
     let Ok(method) = Method::from_bytes(wire.method.as_bytes()) else {
         return AgentResponse::Failed(format!("invalid HTTP method '{}'", wire.method));
     };
-    // Authoritative gate: any state-changing (non-GET) request is an order
-    // mutation, refused unless the agent was started with trading enabled. The
-    // agent — not the client — is the trust boundary for this.
-    if !trading_enabled && method != Method::GET {
-        return AgentResponse::Failed(
-            "trading is disabled on this agent; restart it with --enable-trading to allow orders"
-                .to_owned(),
-        );
+    // Authoritative gate: classify the request by method+path (market data,
+    // account read, or order mutation) and refuse anything above the agent's
+    // configured tier. The agent — not the client — is the trust boundary for
+    // this, so the policy is enforced here on every forwarded request.
+    let required = required_access_for(method.as_str(), &wire.path);
+    if !access.permits(required) {
+        return AgentResponse::Failed(access_denied(required, access));
     }
     let spec =
         RequestSpec::from_parts(method, wire.path, wire.query, wire.body, wire.requires_auth);
@@ -759,12 +767,16 @@ mod tests {
         panic!("socket never appeared");
     }
 
-    /// Spawns an echo agent and returns its one-time token alongside the handle.
-    fn spawn_echo(socket: PathBuf, trading: bool) -> (String, tokio::task::JoinHandle<Result<()>>) {
+    /// Spawns an echo agent at `access` and returns its one-time token alongside
+    /// the handle.
+    fn spawn_echo(
+        socket: PathBuf,
+        access: AccessLevel,
+    ) -> (String, tokio::task::JoinHandle<Result<()>>) {
         let token = AuthToken::generate().unwrap();
         let secret = token.as_str().to_owned();
         let handle = tokio::spawn(async move {
-            serve(Arc::new(EchoExecutor), &socket, trading, token, || {}).await
+            serve(Arc::new(EchoExecutor), &socket, access, token, || {}).await
         });
         (secret, handle)
     }
@@ -786,7 +798,7 @@ mod tests {
     async fn authenticated_round_trips_and_reports_capabilities() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), false);
+        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
         wait_for(&socket).await;
 
         let executor = AgentExecutor::connect(&socket).await.unwrap();
@@ -799,11 +811,11 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::Agent { .. }));
 
-        // Authenticating reveals the agent's base URL and trading policy.
+        // Authenticating reveals the agent's base URL and access policy.
         executor.authenticate(&token).await.unwrap();
         assert!(executor.is_session_authenticated());
         assert_eq!(executor.base_url(), "http://stub/api/1.0");
-        assert!(!executor.trading_enabled());
+        assert_eq!(executor.access(), AccessLevel::View);
 
         executor.ping().await.unwrap();
         // A single persistent connection carries many requests.
@@ -826,7 +838,7 @@ mod tests {
     async fn wrong_token_is_refused_then_correct_token_still_works() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), false);
+        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
         wait_for(&socket).await;
 
         let executor = AgentExecutor::connect(&socket).await.unwrap();
@@ -844,7 +856,7 @@ mod tests {
     async fn token_is_single_use_across_connections() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), false);
+        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
         wait_for(&socket).await;
 
         // First client consumes the token and owns the oracle.
@@ -864,17 +876,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_refuses_mutations_when_trading_disabled() {
+    async fn view_access_allows_reads_refuses_mutations() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), false);
+        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
         wait_for(&socket).await;
 
         let executor = AgentExecutor::connect(&socket).await.unwrap();
         executor.authenticate(&token).await.unwrap();
-        assert!(!executor.trading_enabled());
+        assert_eq!(executor.access(), AccessLevel::View);
 
-        // Reads are allowed.
+        // Account reads are allowed at the view tier.
         executor
             .execute(RequestSpec::get("/orders/active"))
             .await
@@ -890,15 +902,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_allows_mutations_when_trading_enabled() {
+    async fn market_access_allows_only_public_data() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), true);
+        let (token, server) = spawn_echo(socket.clone(), AccessLevel::Market);
         wait_for(&socket).await;
 
         let executor = AgentExecutor::connect(&socket).await.unwrap();
         executor.authenticate(&token).await.unwrap();
-        assert!(executor.trading_enabled());
+        assert_eq!(executor.access(), AccessLevel::Market);
+
+        // Public market data is allowed.
+        let raw = executor.execute(RequestSpec::get("/tickers")).await.unwrap();
+        assert_eq!(raw.body, b"/tickers");
+        // Personal account reads are refused at the market tier...
+        for path in ["/balances", "/orders/active", "/trades/private/BTC-USD"] {
+            let err = executor
+                .execute(RequestSpec::get(path))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Agent { .. }), "should refuse {path}");
+        }
+        // ...as is any order mutation.
+        let err = executor
+            .execute(RequestSpec::delete("/orders/abc"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Agent { .. }));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn trading_access_allows_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (token, server) = spawn_echo(socket.clone(), AccessLevel::Trading);
+        wait_for(&socket).await;
+
+        let executor = AgentExecutor::connect(&socket).await.unwrap();
+        executor.authenticate(&token).await.unwrap();
+        assert_eq!(executor.access(), AccessLevel::Trading);
         let raw = executor
             .execute(RequestSpec::delete("/orders/abc"))
             .await
@@ -927,7 +971,7 @@ mod tests {
         let server = {
             let socket = socket.clone();
             tokio::spawn(async move {
-                serve(Arc::new(EchoExecutor), &socket, false, token, on_connect).await
+                serve(Arc::new(EchoExecutor), &socket, AccessLevel::View, token, on_connect).await
             })
         };
         wait_for(&socket).await;
@@ -950,7 +994,7 @@ mod tests {
     async fn serve_returns_when_the_authenticated_client_disconnects() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), false);
+        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
         wait_for(&socket).await;
 
         let executor = AgentExecutor::connect(&socket).await.unwrap();

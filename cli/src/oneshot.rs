@@ -20,8 +20,15 @@ pub async fn run(global: &GlobalOpts, command: Command, client: &RevolutXClient)
     // Resolve `?` before any await so the non-`Send` error temporary isn't held
     // across an await point (keeps the future `Send`).
     let action = adapt(command)?;
+    let access: revolutx::AccessLevel = global.access.into();
     match action {
         Action::Run { command, confirmed } => {
+            // The agent is the real trust boundary; this local gate just lets the
+            // owner rehearse an `--access` policy without standing up an agent.
+            let required = command.min_access();
+            if !access.permits(required) {
+                return Err(revolutx::access::access_denied(required, access).into());
+            }
             if command.is_real_trading() && !confirmed {
                 return Err("refusing real trading: pass --yes to confirm this order".into());
             }

@@ -4,10 +4,11 @@
 //!
 //! Every tool is forwarded to the signing agent, which is the single
 //! authoritative gate: it refuses all requests until the session has
-//! authenticated (via the `authenticate` tool) and refuses order-mutating
-//! (`place_*`, `cancel_*`) requests unless it was started with trading enabled
-//! (`--enable-trading`). The tool catalog is therefore advertised unconditionally
-//! — the agent, not the MCP, decides what actually runs.
+//! authenticated (via the `authenticate` tool), and then permits only the tools
+//! its `--access` tier allows — account reads (`get_balances`, `get_*_orders`,
+//! private trades) need `--access view`, and order mutations (`place_*`,
+//! `cancel_*`) need `--access trading`. The tool catalog is therefore advertised
+//! unconditionally — the agent, not the MCP, decides what actually runs.
 
 use std::str::FromStr;
 
@@ -179,7 +180,7 @@ pub fn list() -> Vec<Value> {
     ];
 
     // Order-mutating tools are always advertised; the agent refuses them unless
-    // it was started with --enable-trading (and refuses everything pre-auth).
+    // it was started with --access trading (and refuses everything pre-auth).
     tools.push(tool(
         PLACE_LIMIT_ORDER,
             "Place a limit order. REAL TRADING. Requires credentials and trading enabled.",
@@ -231,7 +232,7 @@ pub fn list() -> Vec<Value> {
 /// Builds the shared [`Command`] for a tool call, or a human-readable error for a
 /// bad argument or unknown tool. The server runs it via `revolutx::commands::execute`
 /// and presents the result as JSON. The signing agent stays the authoritative gate —
-/// its "authenticate first" / "trading is disabled" refusals surface as the command's
+/// its "authenticate first" / "access denied" refusals surface as the command's
 /// error.
 // A flat dispatch over tool names; `side`/`size` are both core order terms.
 #[allow(clippy::too_many_lines, clippy::similar_names)]

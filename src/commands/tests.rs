@@ -186,6 +186,95 @@ async fn routes_every_command_to_its_endpoint() {
 }
 
 #[tokio::test]
+async fn min_access_agrees_with_request_classification() {
+    use crate::access::{AccessLevel, required_access_for};
+
+    // For every command, the variant-side classifier (`min_access`) must agree
+    // with the HTTP-path classifier the agent's gate uses (`required_access_for`),
+    // so the CLI's local gate and the agent's authoritative gate never diverge.
+    async fn check(command: Command, expected: AccessLevel) {
+        assert_eq!(command.min_access(), expected, "min_access for {command:?}");
+        let (method, path) = route(command).await;
+        assert_eq!(
+            required_access_for(&method, &path),
+            expected,
+            "required_access_for {method} {path}"
+        );
+    }
+
+    use AccessLevel::{Market, Trading, View};
+    let q = TradesQuery::default;
+    let cq = || CandlesQuery {
+        interval: None,
+        since: None,
+        until: None,
+    };
+    let sym = || "BTC-USD".to_owned();
+
+    check(Command::Tickers { symbols: vec![] }, Market).await;
+    check(Command::Currencies, Market).await;
+    check(Command::Pairs, Market).await;
+    check(
+        Command::OrderBook {
+            symbol: sym(),
+            limit: None,
+        },
+        Market,
+    )
+    .await;
+    check(Command::PublicOrderBook { symbol: sym() }, Market).await;
+    check(
+        Command::Candles {
+            symbol: sym(),
+            query: cq(),
+        },
+        Market,
+    )
+    .await;
+    check(Command::LastTrades, Market).await;
+    check(
+        Command::AllTrades {
+            symbol: sym(),
+            query: q(),
+        },
+        Market,
+    )
+    .await;
+
+    check(Command::Balances, View).await;
+    check(
+        Command::PrivateTrades {
+            symbol: sym(),
+            query: q(),
+        },
+        View,
+    )
+    .await;
+    check(Command::ActiveOrders(ActiveOrdersQuery::default()), View).await;
+    check(
+        Command::HistoricalOrders(HistoricalOrdersQuery::default()),
+        View,
+    )
+    .await;
+    check(Command::GetOrder(OrderId::new("abc")), View).await;
+    check(Command::OrderFills(OrderId::new("abc")), View).await;
+
+    check(Command::Cancel(OrderId::new("abc")), Trading).await;
+    check(Command::CancelAll, Trading).await;
+    check(
+        Command::PlaceMarket(PlaceMarket {
+            symbol: sym(),
+            side: Side::Sell,
+            size: Decimal::from(1),
+            in_quote: false,
+            client_order_id: None,
+        }),
+        Trading,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn parses_balances_into_output() {
     let (client, _) = client_with(
         200,

@@ -98,6 +98,8 @@ pub mod model;
 #[cfg(feature = "fix")]
 pub mod fix;
 
+#[cfg(any(feature = "agent", feature = "commands"))]
+pub mod access;
 #[cfg(feature = "rest")]
 mod auth;
 #[cfg(feature = "commands")]
@@ -110,6 +112,8 @@ pub mod transport;
 #[cfg(feature = "agent")]
 pub mod agent;
 
+#[cfg(any(feature = "agent", feature = "commands"))]
+pub use access::AccessLevel;
 #[cfg(feature = "agent")]
 pub use agent::{AgentExecutor, AuthToken, default_socket_path, serve};
 #[cfg(feature = "rest")]

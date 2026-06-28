@@ -171,8 +171,8 @@ impl Server {
     }
 
     /// Handles the `authenticate` tool: presents the one-time token to the agent.
-    /// On success the agent reveals its environment and trading policy, and every
-    /// other tool becomes usable on this connection.
+    /// On success the agent reveals its environment and access policy, and every
+    /// other tool becomes usable on this connection (subject to that policy).
     async fn authenticate(&self, id: Value, args: &Value) -> Value {
         let Some(token) = args.get(tools::ARG_TOKEN).and_then(Value::as_str) else {
             return success(id, tool_content(MISSING_TOKEN, true));
@@ -183,13 +183,10 @@ impl Server {
         match agent.authenticate(token).await {
             Ok(()) => {
                 let text = format!(
-                    "Authenticated with the signing agent. Environment: {}; trading {}.",
+                    "Authenticated with the signing agent. Environment: {}; access: {} \
+                     (the agent enforces this — tools above this tier are refused).",
                     agent.base_url(),
-                    if agent.trading_enabled() {
-                        "ENABLED"
-                    } else {
-                        "disabled"
-                    }
+                    agent.access().as_str(),
                 );
                 success(id, tool_content(text, false))
             }

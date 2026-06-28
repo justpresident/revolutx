@@ -87,11 +87,21 @@ master password. Run a **signing agent**: it unlocks the vault once, then signs
 and performs every request on behalf of the client connected to its unix socket.
 
 ```sh
-revolutx agent start --auth-token                   # prompts once, prints a one-time token, then serves (read-only)
-revolutx agent start --auth-token --enable-trading  # also permit order placement/cancellation (REAL TRADING)
+revolutx agent start --auth-token                     # prompts once, prints a one-time token, then serves (market data only)
+revolutx agent start --auth-token --access view       # also permit read-only account data (balances, your orders/trades)
+revolutx agent start --auth-token --access trading    # also permit order placement/cancellation (REAL TRADING)
 revolutx agent start --auth-token --idle-timeout 600  # exit if no client authenticates in 10 min
 revolutx agent start --auth-token --idle-timeout 0    # never auto-lock before authenticating
 ```
+
+`--access` sets the capability tier the agent serves (the global flag also gates
+ordinary CLI commands locally, so you can rehearse a policy without an agent):
+
+| tier              | allows                                                              |
+| ----------------- | ------------------------------------------------------------------ |
+| `market` (default)| public market data + exchange reference (tickers, books, candles, public trades, currencies, pairs) |
+| `view`            | the above **plus** read-only account data (balances, your orders/trades, fills) |
+| `trading`         | the above **plus** placing, replacing, and cancelling orders (REAL TRADING) |
 
 It is a **full proxy**: the client sends a request description and receives only
 the response bytes — neither the private key nor the API key ever leaves the
@@ -106,9 +116,10 @@ agent. Protections:
 - **Single client.** Connections are accepted concurrently but only the one that
   presents the token is served. When that client disconnects, the daemon exits
   and the vault is re-locked; the token is spent, so no reconnect can authenticate.
-- **Trading off by default.** The agent refuses every order-mutating request
-  unless started with `--enable-trading`. This is the authoritative gate — a
-  connected client (e.g. the MCP) cannot turn trading on.
+- **Least privilege by default.** The agent serves only its `--access` tier
+  (default `market`: public market data, no account data, no trading) and refuses
+  everything above it. This is the authoritative gate — a connected client (e.g.
+  the MCP) cannot widen its own access.
 - **Pre-authentication idle timeout** (default 5 minutes). If no client
   authenticates in time, the agent auto-locks and exits. Merely connecting does
   not reset it — only authentication does; once a client is authenticated it is

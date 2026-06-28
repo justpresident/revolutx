@@ -33,12 +33,50 @@ pub struct GlobalOpts {
     /// traced hosts).
     #[arg(long, global = true)]
     pub insecure_allow_debugging: bool,
+    /// Capability tier this session may use (cumulative; default: market).
+    ///
+    /// `market` allows only public market data and exchange reference data
+    /// (tickers, order books, candles, public trades, currencies, pairs).
+    /// `view` adds read-only account data (balances, your orders and trades,
+    /// fills). `trading` adds placing, replacing, and cancelling orders.
+    /// `revolutx agent start` serves clients at this tier and enforces it as the
+    /// authoritative gate; for ordinary commands the CLI applies the same gate
+    /// locally, so you can rehearse an agent policy. Order placement still needs
+    /// per-command --yes/confirmation on top of `trading`.
+    #[arg(long, global = true, value_enum, default_value_t = AccessArg::Market)]
+    pub access: AccessArg,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
 pub enum EnvArg {
     Production,
     Dev,
+}
+
+/// The `--access` capability tiers, lowest to highest. Each tier includes every
+/// operation the ones before it allow.
+#[derive(Copy, Clone, ValueEnum)]
+pub enum AccessArg {
+    /// Public market data and exchange reference data only: tickers, order books,
+    /// candles, public trades, currencies, and pairs. No personal account data and
+    /// no trading.
+    Market,
+    /// Market data plus read-only account data: balances, your own orders and
+    /// trades, and order fills. Cannot place, replace, or cancel orders.
+    View,
+    /// Everything in `view` plus placing, replacing, and cancelling orders (REAL
+    /// TRADING; still requires per-command --yes/confirmation).
+    Trading,
+}
+
+impl From<AccessArg> for revolutx::AccessLevel {
+    fn from(arg: AccessArg) -> Self {
+        match arg {
+            AccessArg::Market => Self::Market,
+            AccessArg::View => Self::View,
+            AccessArg::Trading => Self::Trading,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -115,11 +153,6 @@ pub enum AgentCmd {
         /// it.
         #[arg(long, default_value_t = 300)]
         idle_timeout: u64,
-        /// Allow the connected client to place and cancel orders (REAL TRADING).
-        /// Off by default: the agent refuses every order-mutating request. This
-        /// is the authoritative gate — clients cannot override it.
-        #[arg(long)]
-        enable_trading: bool,
     },
 }
 

@@ -116,8 +116,15 @@ fn run_line(global: &GlobalOpts, runtime: &Runtime, client: &RevolutXClient, lin
     }
 
     let json = global.json || parsed.json;
+    let access: revolutx::AccessLevel = global.access.into();
     match adapt(parsed.command)? {
         Action::Run { command, confirmed } => {
+            // Same local rehearsal gate as the one-shot path (the agent is the real
+            // boundary); refuse before prompting for a trade we wouldn't run anyway.
+            let required = command.min_access();
+            if !access.permits(required) {
+                return Err(revolutx::access::access_denied(required, access).into());
+            }
             if command.is_real_trading() && !confirmed && !confirm()? {
                 println!("cancelled.");
                 return Ok(());

@@ -37,8 +37,7 @@ pub fn run(global: &GlobalOpts, command: AgentCmd) -> Res<()> {
             socket,
             auth_token,
             idle_timeout,
-            enable_trading,
-        } => start(global, socket, auth_token, idle_timeout, enable_trading),
+        } => start(global, socket, auth_token, idle_timeout),
     }
 }
 
@@ -47,7 +46,6 @@ fn start(
     socket: Option<PathBuf>,
     auth_token: bool,
     idle_timeout: u64,
-    enable_trading: bool,
 ) -> Res<()> {
     // A client can only ever be authenticated with a one-time token, so refuse to
     // start without one — before touching the vault. (Interactive operator
@@ -85,22 +83,19 @@ fn start(
         move || connected.store(true, Ordering::Relaxed)
     };
 
+    let access: revolutx::AccessLevel = global.access.into();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     print_token(token.as_str());
     eprintln!(
-        "revolutx-agent: listening on {} (trading {})",
+        "revolutx-agent: listening on {} (access: {})",
         socket_path.display(),
-        if enable_trading {
-            "ENABLED"
-        } else {
-            "disabled"
-        }
+        access.as_str(),
     );
     let result = runtime.block_on(async {
         tokio::select! {
-            served = serve(executor, &socket_path, enable_trading, token, on_connect) => served.map_err(Into::into),
+            served = serve(executor, &socket_path, access, token, on_connect) => served.map_err(Into::into),
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("revolutx-agent: shutting down");
                 Ok(())

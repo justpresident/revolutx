@@ -1,5 +1,6 @@
 //! The parse-neutral command model.
 
+use crate::access::AccessLevel;
 use crate::api::market_data::{CandleInterval, CandlesQuery};
 use crate::api::orders::{ActiveOrdersQuery, HistoricalOrdersQuery};
 use crate::api::trades::TradesQuery;
@@ -87,18 +88,45 @@ pub struct PlaceMarket {
 }
 
 impl Command {
+    /// The minimum [`AccessLevel`] required to run this command: public market data
+    /// and exchange reference lookups need [`Market`](AccessLevel::Market); reading
+    /// personal account data needs [`View`](AccessLevel::View); placing, replacing,
+    /// or cancelling orders needs [`Trading`](AccessLevel::Trading).
+    ///
+    /// This is the command-side mirror of [`required_access_for`](crate::access::required_access_for),
+    /// which classifies the same operations by their HTTP request; the two are kept
+    /// in lockstep by a test. A surface (the CLI directly, the agent at its trust
+    /// boundary) refuses a command whose `min_access` exceeds the session's tier.
+    #[must_use]
+    pub const fn min_access(&self) -> AccessLevel {
+        match self {
+            Self::Tickers { .. }
+            | Self::OrderBook { .. }
+            | Self::PublicOrderBook { .. }
+            | Self::Candles { .. }
+            | Self::LastTrades
+            | Self::AllTrades { .. }
+            | Self::Currencies
+            | Self::Pairs => AccessLevel::Market,
+            Self::Balances
+            | Self::PrivateTrades { .. }
+            | Self::ActiveOrders(_)
+            | Self::HistoricalOrders(_)
+            | Self::GetOrder(_)
+            | Self::OrderFills(_) => AccessLevel::View,
+            Self::PlaceLimit(_)
+            | Self::PlaceMarket(_)
+            | Self::Replace { .. }
+            | Self::Cancel(_)
+            | Self::CancelAll => AccessLevel::Trading,
+        }
+    }
+
     /// Whether this command places, replaces, or cancels real orders — so a
     /// surface can gate it behind a confirmation. Reads and market data are not.
     #[must_use]
     pub const fn is_real_trading(&self) -> bool {
-        matches!(
-            self,
-            Self::PlaceLimit(_)
-                | Self::PlaceMarket(_)
-                | Self::Replace { .. }
-                | Self::Cancel(_)
-                | Self::CancelAll
-        )
+        matches!(self.min_access(), AccessLevel::Trading)
     }
 }
 
