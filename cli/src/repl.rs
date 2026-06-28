@@ -46,7 +46,12 @@ pub fn run(global: &GlobalOpts) -> Res {
         .build()?;
     let symbols = runtime.block_on(fetch_symbols(&client));
 
-    let mut editor: Editor<ReplHelper, DefaultHistory> = Editor::new()?;
+    // `List` shows all candidates (like a shell), rather than cycling through them
+    // in place on each Tab (the default `Circular`).
+    let config = rustyline::Config::builder()
+        .completion_type(rustyline::CompletionType::List)
+        .build();
+    let mut editor: Editor<ReplHelper, DefaultHistory> = Editor::with_config(config)?;
     editor.set_helper(Some(ReplHelper::new(symbols)));
 
     eprintln!("revolutx interactive shell — run a command, `help`, or `exit` (Ctrl-D to quit).");
