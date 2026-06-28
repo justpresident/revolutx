@@ -48,7 +48,7 @@ const CANCEL_ORDER: &str = "cancel_order";
 const CANCEL_ALL_ORDERS: &str = "cancel_all_orders";
 
 /// Returns the tool definitions exposed via `tools/list`. The catalog is fixed:
-/// the agent enforces authentication and the trading gate at call time.
+/// the agent enforces authentication and the access gate at call time.
 // A flat, declarative catalog of tool schemas; splitting it would not aid clarity.
 #[allow(clippy::too_many_lines)]
 pub fn list() -> Vec<Value> {
@@ -183,7 +183,7 @@ pub fn list() -> Vec<Value> {
     // it was started with --access trading (and refuses everything pre-auth).
     tools.push(tool(
         PLACE_LIMIT_ORDER,
-            "Place a limit order. REAL TRADING. Requires credentials and trading enabled.",
+            "Place a limit order. REAL TRADING. Requires the agent at --access trading.",
             json!({
                 "type": "object",
                 "properties": {
@@ -201,7 +201,7 @@ pub fn list() -> Vec<Value> {
         ));
     tools.push(tool(
             PLACE_MARKET_ORDER,
-            "Place a market order. REAL TRADING. Requires credentials and trading enabled.",
+            "Place a market order. REAL TRADING. Requires the agent at --access trading.",
             json!({
                 "type": "object",
                 "properties": {

@@ -45,8 +45,8 @@ impl Server {
     ///
     /// The agent holds the keystore and does **all** signing and HTTP, so the MCP
     /// keeps no key material and needs no process hardening of its own. The agent
-    /// also owns the environment (base URL) and the trading policy and enforces
-    /// both peer authentication and the trading gate; the MCP learns the policy
+    /// also owns the environment (base URL) and the access policy and enforces
+    /// both peer authentication and the access gate; the MCP learns the policy
     /// only after authenticating. Configuration is a single, optional,
     /// non-sensitive variable:
     ///
@@ -136,7 +136,7 @@ impl Server {
             "protocolVersion": protocol_version,
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-            "instructions": "Tools for the Revolut X crypto exchange, served via a signing agent. Call `authenticate` FIRST with the one-time token the operator obtained from `revolutx agent start --auth-token`; until you do, every other tool fails with \"authenticate first\". Order placement and cancellation additionally require that the agent was started with trading enabled."
+            "instructions": "Tools for the Revolut X crypto exchange, served via a signing agent. Call `authenticate` FIRST with the one-time token the operator obtained from `revolutx agent start --auth-token`; until you do, every other tool fails with \"authenticate first\". The agent serves a fixed access tier (reported on authenticate): account reads need `--access view` and order placement/cancellation need `--access trading`; tools above the tier return \"access denied\"."
         })
     }
 
