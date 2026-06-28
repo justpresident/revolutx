@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use revolutx::RevolutXClient;
 use revolutx::commands;
 use rustyline::Editor;
@@ -18,7 +18,7 @@ use rustyline::history::DefaultHistory;
 use tokio::runtime::Runtime;
 
 use crate::adapter::{Action, adapt};
-use crate::args::{Command as ArgCommand, GlobalOpts};
+use crate::args::{Cli, Command as ArgCommand, GlobalOpts};
 use crate::helper::ReplHelper;
 use crate::human::render;
 use crate::{creds, line};
@@ -89,12 +89,22 @@ fn run_line(global: &GlobalOpts, runtime: &Runtime, client: &RevolutXClient, lin
         return Ok(());
     }
     // Reuse the one-shot grammar. clap reports `--help` and parse errors via an
-    // `Err`; let it print them itself (help → stdout, errors → stderr) rather than
-    // dressing help up as an "error:".
-    let parsed = match ReplLine::try_parse_from(tokens) {
+    // `Err`. Let clap print the error itself (the specific reason), but on a usage
+    // error also print the full command help — clap's error usage is terse, and
+    // the shell wants the same option list `--help` shows.
+    let parsed = match ReplLine::try_parse_from(tokens.iter().map(String::as_str)) {
         Ok(parsed) => parsed,
         Err(e) => {
+            use clap::error::ErrorKind::{
+                DisplayHelp, DisplayHelpOnMissingArgumentOrSubcommand, DisplayVersion,
+            };
             let _ = e.print();
+            if !matches!(
+                e.kind(),
+                DisplayHelp | DisplayVersion | DisplayHelpOnMissingArgumentOrSubcommand
+            ) {
+                print_command_help(&tokens);
+            }
             return Ok(());
         }
     };
@@ -164,6 +174,28 @@ fn run_watch(json: bool, runtime: &Runtime, client: &RevolutXClient, symbol: &st
         }
     });
     let _ = reader.join();
+}
+
+/// Prints the full help for the deepest subcommand named by the leading tokens,
+/// so a usage error shows the same option list as `--help`. The command path is
+/// set as the bin name so the usage line reads e.g. `trades all`, not `all`.
+fn print_command_help(tokens: &[String]) {
+    let mut node = Cli::command();
+    let mut path: Vec<&str> = Vec::new();
+    for token in tokens {
+        if token.starts_with('-') {
+            break;
+        }
+        let Some(sub) = node.find_subcommand(token).cloned() else {
+            break;
+        };
+        path.push(token);
+        node = sub;
+    }
+    if !path.is_empty() {
+        node = node.bin_name(path.join(" "));
+    }
+    let _ = node.print_help();
 }
 
 /// Prompts for confirmation of a real-trading command (reads `/dev/tty`).
