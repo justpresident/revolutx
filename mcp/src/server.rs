@@ -1,11 +1,13 @@
 //! MCP server: configuration and JSON-RPC request dispatch.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use revolutx::agent::{AgentExecutor, default_socket_path};
 use revolutx::commands::{JsonPresenter, Presenter};
 use revolutx::{RequestExecutor, RevolutXClient};
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 
 use crate::protocol::{
     INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR, error, success,
@@ -19,58 +21,51 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Tool error: the `authenticate` call was missing its token argument.
 const MISSING_TOKEN: &str = "authenticate requires a 'token' string argument";
-/// Tool error: `authenticate` was called but no signing agent is wired in.
-const NO_AGENT: &str = "no signing agent is connected";
+/// Tool error: a tool other than `authenticate` was called before this session has
+/// authenticated with the agent.
+const NOT_AUTHENTICATED: &str =
+    "authenticate first: call the `authenticate` tool with the one-time token from \
+     `revolutx agent start --auth-token`";
 
-/// A configured MCP server over a `revolutx` client.
+/// An MCP server that proxies to a `revolutx` signing agent over a unix socket.
+///
+/// The MCP and the agent are **independent processes**: this server resolves the
+/// socket path at startup but does not touch it until the `authenticate` tool is
+/// called, and it reconnects on every authenticate. So the agent can be started,
+/// stopped, or restarted at any time — after a restart the LLM simply calls
+/// `authenticate` again with the new token and the session is re-established. The
+/// MCP holds no key material; the agent owns the keystore, environment, and the
+/// access policy and does all signing and HTTP.
 pub struct Server {
-    client: RevolutXClient,
-    /// The signing agent, when connected. The MCP authenticates this session
-    /// (with the agent's one-time token, via the `authenticate` tool) before the
-    /// agent will serve any request. `None` only in unit tests, which exercise
-    /// protocol dispatch without a live agent.
-    agent: Option<Arc<AgentExecutor>>,
+    /// The agent's unix socket path. Read once at startup; only ever opened by
+    /// `authenticate` (the socket file need not exist before then).
+    socket: PathBuf,
+    /// The current authenticated connection, established by `authenticate` and
+    /// replaced on each re-authenticate. `None` until the first successful
+    /// authentication.
+    session: Mutex<Option<Arc<AgentExecutor>>>,
 }
 
 impl Server {
-    #[cfg(test)]
-    pub const fn new(client: RevolutXClient) -> Self {
+    /// Builds a server targeting `socket`. No connection is made here.
+    fn with_socket(socket: PathBuf) -> Self {
         Self {
-            client,
-            agent: None,
+            socket,
+            session: Mutex::new(None),
         }
     }
 
-    /// Connects the server to a running `revolutx agent`.
-    ///
-    /// The agent holds the keystore and does **all** signing and HTTP, so the MCP
-    /// keeps no key material and needs no process hardening of its own. The agent
-    /// also owns the environment (base URL) and the access policy and enforces
-    /// both peer authentication and the access gate; the MCP learns the policy
-    /// only after authenticating. Configuration is a single, optional,
-    /// non-sensitive variable:
+    /// Builds the server from the environment. Does **not** connect to the agent —
+    /// the connection is made lazily on `authenticate`, so the MCP starts cleanly
+    /// whether or not an agent is running yet, and survives the agent restarting.
+    /// Configuration is a single, optional, non-sensitive variable:
     ///
     /// - `REVOLUTX_AGENT_SOCKET` — the agent's unix socket path (default
     ///   `$XDG_RUNTIME_DIR/revolutx-agent.sock`).
-    ///
-    /// The connection starts unauthenticated: the LLM must call the
-    /// `authenticate` tool with the one-time token the operator obtained from
-    /// `revolutx agent start --auth-token` before any other tool works.
-    pub async fn from_env() -> Result<Self, String> {
+    pub fn from_env() -> Self {
         let socket =
             env_nonempty("REVOLUTX_AGENT_SOCKET").map_or_else(default_socket_path, Into::into);
-        let executor = AgentExecutor::connect(&socket).await.map_err(|e| {
-            format!(
-                "could not connect to the agent at {}: {e}",
-                socket.display()
-            )
-        })?;
-        let agent = Arc::new(executor);
-        let client = RevolutXClient::with_executor(Arc::clone(&agent) as Arc<_>);
-        Ok(Self {
-            client,
-            agent: Some(agent),
-        })
+        Self::with_socket(socket)
     }
 
     /// Handles one JSON-RPC message line. Returns the serialized response line,
@@ -161,7 +156,13 @@ impl Server {
             Ok(command) => command,
             Err(message) => return success(id, tool_content(message, true)),
         };
-        match revolutx::commands::execute(&self.client, command).await {
+        // Run on the connection `authenticate` established; without one nothing can
+        // run yet. The agent itself still enforces auth + the access gate on top.
+        let Some(agent) = self.session.lock().await.clone() else {
+            return success(id, tool_content(NOT_AUTHENTICATED, true));
+        };
+        let client = RevolutXClient::with_executor(agent as Arc<_>);
+        match revolutx::commands::execute(&client, command).await {
             Ok(output) => match JsonPresenter.present(&output) {
                 Ok(text) => success(id, tool_content(text, false)),
                 Err(e) => success(id, tool_content(e.to_string(), true)),
@@ -170,24 +171,44 @@ impl Server {
         }
     }
 
-    /// Handles the `authenticate` tool: presents the one-time token to the agent.
+    /// Handles the `authenticate` tool: opens a fresh connection to the agent and
+    /// presents the one-time token.
+    ///
+    /// This is the only place the socket is opened, so the agent can be started or
+    /// restarted independently of the MCP — re-calling `authenticate` (with the new
+    /// token a restarted agent prints) reconnects and supersedes any prior session.
     /// On success the agent reveals its environment and access policy, and every
-    /// other tool becomes usable on this connection (subject to that policy).
+    /// other tool becomes usable (subject to that policy).
     async fn authenticate(&self, id: Value, args: &Value) -> Value {
         let Some(token) = args.get(tools::ARG_TOKEN).and_then(Value::as_str) else {
             return success(id, tool_content(MISSING_TOKEN, true));
         };
-        let Some(agent) = self.agent.as_ref() else {
-            return success(id, tool_content(NO_AGENT, true));
+        let executor = match AgentExecutor::connect(&self.socket).await {
+            Ok(executor) => Arc::new(executor),
+            Err(e) => {
+                return success(
+                    id,
+                    tool_content(
+                        format!(
+                            "could not connect to the agent at {sock}: {e}. Start it with \
+                             `revolutx agent start --auth-token --socket {sock}`.",
+                            sock = self.socket.display(),
+                        ),
+                        true,
+                    ),
+                );
+            }
         };
-        match agent.authenticate(token).await {
+        match executor.authenticate(token).await {
             Ok(()) => {
                 let text = format!(
                     "Authenticated with the signing agent. Environment: {}; access: {} \
                      (the agent enforces this — tools above this tier are refused).",
-                    agent.base_url(),
-                    agent.access().as_str(),
+                    executor.base_url(),
+                    executor.access().as_str(),
                 );
+                // Supersede any prior connection (e.g. to a now-restarted agent).
+                *self.session.lock().await = Some(executor);
                 success(id, tool_content(text, false))
             }
             Err(e) => success(id, tool_content(e.to_string(), true)),
@@ -210,13 +231,10 @@ mod tests {
     use super::*;
 
     fn public_server() -> Server {
-        // No agent connected: tools that reach the network would fail, but the
-        // protocol dispatch under test does not get that far.
-        let client = RevolutXClient::builder()
-            .base_url("http://127.0.0.1:1/api/1.0")
-            .build()
-            .unwrap();
-        Server::new(client)
+        // Points at a socket with no agent listening: `authenticate` reports a
+        // connection failure and other tools report "authenticate first". The
+        // protocol dispatch under test never reaches a live agent.
+        Server::with_socket("/nonexistent/revolutx-agent.sock".into())
     }
 
     async fn handle(server: &Server, msg: Value) -> Option<Value> {
@@ -299,7 +317,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticate_validates_token_and_reports_missing_agent() {
+    async fn authenticate_validates_token_and_reports_connection_failure() {
         // Missing token argument is a tool error, not a protocol error.
         let resp = handle(
             &public_server(),
@@ -319,7 +337,8 @@ mod tests {
                 .contains("token")
         );
 
-        // With a token but no agent wired (unit-test server), it is a tool error.
+        // With a token but no agent listening on the socket, it is a tool error
+        // describing the connection failure (the socket is opened lazily, here).
         let resp = handle(
             &public_server(),
             json!({
@@ -334,7 +353,30 @@ mod tests {
             resp["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("no signing agent")
+                .contains("could not connect to the agent")
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_before_authenticate_is_authenticate_first() {
+        // A real tool (not `authenticate`) before any session reports "authenticate
+        // first" — it never touches the socket.
+        let resp = handle(
+            &public_server(),
+            json!({
+                "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": { "name": "get_tickers", "arguments": {} }
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(resp.get("error").is_none());
+        assert_eq!(resp["result"]["isError"], true);
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("authenticate first")
         );
     }
 

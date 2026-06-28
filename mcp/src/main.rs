@@ -37,16 +37,10 @@ async fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    let server = match Server::from_env().await {
-        Ok(server) => server,
-        Err(e) => {
-            eprintln!("revolutx-mcp: configuration error: {e}");
-            std::process::exit(1);
-        }
-    };
+    let server = Server::from_env();
     eprintln!(
-        "revolutx-mcp ready (connected to agent; not yet authenticated — call the \
-         `authenticate` tool with the agent's one-time token)"
+        "revolutx-mcp ready — call the `authenticate` tool with the agent's one-time \
+         token. The agent connects lazily and may be (re)started independently."
     );
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
