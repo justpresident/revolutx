@@ -77,6 +77,16 @@ git diff --quiet && git diff --cached --quiet \
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     die "tag $TAG already exists — the version is already released, or delete the stale local tag (git tag -d $TAG)"
 fi
+# Refuse a version already on crates.io. `cargo publish --dry-run` does NOT check
+# this (it only builds), so without it the clash would only surface at the final
+# upload — after the rebase, tag, and push. Best-effort: needs curl + network; if
+# either is missing we fall through to cargo's own check at publish time.
+if command -v curl >/dev/null 2>&1; then
+    INDEX_URL="https://index.crates.io/${CRATE:0:2}/${CRATE:2:2}/$CRATE"
+    if curl -fsSL "$INDEX_URL" 2>/dev/null | grep -Fq "\"vers\":\"$VERSION\""; then
+        die "$CRATE $VERSION is already published on crates.io (versions are immutable) — bump the version in $MANIFEST"
+    fi
+fi
 command -v gh >/dev/null 2>&1 || die "the 'gh' CLI is required"
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated — run 'gh auth login'"
 [ -n "${CARGO_REGISTRY_TOKEN:-}" ] || ls ~/.cargo/credentials* >/dev/null 2>&1 \
