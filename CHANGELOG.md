@@ -11,6 +11,13 @@ binary changes were logged together in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-30
+
+Adopts rcypher 0.4 for the encrypted vault — a breaking dependency bump for
+`keystore`-feature users, whose re-exported rcypher types move with it — and adds
+public-key derivation/storage and `Symbol` normalization helpers. Existing vaults
+still unlock; no migration.
+
 ### Added
 
 - `public_pem_from_private_pem` (`rest` feature): derive the SPKI public-key PEM

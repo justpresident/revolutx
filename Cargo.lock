@@ -1865,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "revolutx"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "bincode",
@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "revolutx-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "indicatif",

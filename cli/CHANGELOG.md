@@ -7,6 +7,12 @@ library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.m
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-30
+
+Modernizes `vault init` on rcypher 0.4's reusable new-store flow (optional FIDO2
+enrolment at creation), stores the public key, and shows a progress spinner during
+the slow key-derivation steps.
+
 ### Added
 
 - `vault init` now also stores the Ed25519 public key in the vault (record

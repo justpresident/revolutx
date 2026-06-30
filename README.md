@@ -41,7 +41,7 @@ automatically with Ed25519, and never represents money or quantities as `f64`
 
 ```toml
 [dependencies]
-revolutx = "0.3"
+revolutx = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
