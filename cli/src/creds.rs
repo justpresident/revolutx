@@ -10,18 +10,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rcypher::cli::{
-    NoProgress, confirm_if_weak_password, get_password, prompt_password, prompt_until_unlocked,
+    InitFactor, InitFactorKind, NewStoreConfig, prompt_password, prompt_until_initialized,
+    prompt_until_unlocked,
 };
 use rcypher::{Argon2Params, LockedContainer, SecretStore};
 use revolutx::{ClientConfig, Environment, Keystore, RevolutXClient};
 use zeroize::Zeroizing;
 
 use crate::args::{EnvArg, GlobalOpts, VaultCmd};
+use crate::progress::SpinnerProgress;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// The factor name given to the initial password when a vault is created.
 const PRIMARY_FACTOR: &str = "primary";
+
+/// The factor name given to a FIDO2 security key offered at vault creation
+/// (only when built with the `fido2` feature).
+#[cfg(feature = "fido2")]
+const SECURITY_KEY_FACTOR: &str = "security-key";
 
 const fn environment(global: &GlobalOpts) -> Environment {
     match global.env {
@@ -79,7 +86,7 @@ pub fn client(global: &GlobalOpts, needs_auth: bool) -> Res<RevolutXClient> {
 fn unlock_vault(path: &Path) -> Res<Keystore> {
     let mut locked = LockedContainer::load(path)?;
     eprintln!("Unlock {}: {}", path.display(), locked.requirement());
-    prompt_until_unlocked(&mut locked, &mut NoProgress)?;
+    prompt_until_unlocked(&mut locked, &mut SpinnerProgress::new())?;
     let unlocked = locked.unlock::<SecretStore>()?;
     Ok(Keystore::from_unlocked(unlocked))
 }
@@ -90,9 +97,10 @@ pub fn run_vault(global: &GlobalOpts, command: &VaultCmd) -> Res<()> {
     init_vault(global, key_file.as_deref())
 }
 
-/// One-time vault setup: master password → key pair (generated, or imported with
-/// `--key-file`) → API key → encrypted `SecretStore`. Every secret is `Zeroizing`,
-/// so it is wiped on any exit, including the early returns below.
+/// One-time vault setup: enrol the vault's unlock factors → key pair (generated,
+/// or imported with `--key-file`) → API key → encrypted `SecretStore`. Every
+/// secret is `Zeroizing`, so it is wiped on any exit, including the early returns
+/// below.
 fn init_vault(global: &GlobalOpts, key_file: Option<&Path>) -> Res<()> {
     let path = vault_path(global);
     if path.exists() {
@@ -100,15 +108,23 @@ fn init_vault(global: &GlobalOpts, key_file: Option<&Path>) -> Res<()> {
     }
     create_private_dir(path.parent())?;
 
-    // 1. Choose the master password (shows the unrecoverable-password warning and
-    //    confirms it), gated against weak choices, then create the store. The
-    //    password is wiped as soon as the store's key is derived.
-    let password = get_password(&path, true)?;
-    if !confirm_if_weak_password(&password, &[PRIMARY_FACTOR, "revolutx"])? {
-        return Err("vault creation cancelled (weak password not confirmed)".into());
-    }
-    let mut keystore = Keystore::create(PRIMARY_FACTOR, &password, &Argon2Params::default())?;
-    drop(password);
+    // 1. Enrol the unlock factors and create the store with rcypher's standard
+    //    new-store flow: it shows the unrecoverable-password warning, confirms the
+    //    password and gates it against weak choices, and — when built with the
+    //    `fido2` feature — offers a security key and the unlock-policy choice. It
+    //    returns an unlocked container, ready to populate; secrets are wiped inside.
+    let factors = init_factors();
+    let config = NewStoreConfig {
+        factors: &factors,
+        fido2_rp_id: None,
+    };
+    let container = prompt_until_initialized(
+        SecretStore::new(),
+        &config,
+        &Argon2Params::default(),
+        &mut SpinnerProgress::new(),
+    )?;
+    let mut keystore = Keystore::from_unlocked(container);
 
     // 2. Put the private key into the store. Generate a fresh pair (default) or
     //    import an existing PEM.
@@ -135,10 +151,31 @@ fn init_vault(global: &GlobalOpts, key_file: Option<&Path>) -> Res<()> {
         path.display()
     );
     println!(
-        "Tip: add a FIDO2 security key or change the password with the `rcypher` CLI — \
-         the vault is rcypher's standard format."
+        "Tip: manage this vault later — add or remove factors, change the password, \
+         rotate the API key — with the `rcypher` CLI; it is rcypher's standard format."
     );
     Ok(())
+}
+
+/// The factors offered when creating a vault: a required master password, plus —
+/// when built with the `fido2` feature — the option of a FIDO2 security key. The
+/// new-store flow offers each optional factor in turn and, when more than one is
+/// enrolled, lets the user pick the unlock policy (any one of them, or all).
+fn init_factors() -> Vec<InitFactor<'static>> {
+    let factors = vec![InitFactor {
+        kind: InitFactorKind::Password,
+        name: PRIMARY_FACTOR,
+    }];
+    #[cfg(feature = "fido2")]
+    let factors = {
+        let mut factors = factors;
+        factors.push(InitFactor {
+            kind: InitFactorKind::Fido2,
+            name: SECURITY_KEY_FACTOR,
+        });
+        factors
+    };
+    factors
 }
 
 /// Prints the onboarding instructions shown after generating a key pair.

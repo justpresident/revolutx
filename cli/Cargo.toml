@@ -19,16 +19,21 @@ default = ["fido2"]
 # Unlock the vault with a hardware FIDO2 security-key factor (in addition to a
 # password), on by default. Build with `--no-default-features` on hosts without
 # the native USB-HID build deps (libudev/hidapi + pkg-config) or for a static
-# musl binary; password-only vaults still unlock. Enrolling a key (and other
-# vault management) is done with the `rcypher` CLI, which reads the same format.
+# musl binary; password-only vaults still unlock. With this feature, `revolutx
+# vault init` also offers to enrol a security key at creation; other vault
+# management (rotating factors, changing the password) is done with the
+# `rcypher` CLI, which reads the same format.
 fido2 = ["rcypher/fido2"]
 
 [dependencies]
 revolutx = { path = "..", version = "0.3", features = ["rest", "keystore", "agent", "commands"] }
 # rcypher's storage format + interactive unlock plumbing (prompts, strength gate,
 # the multi-factor unlock loop). The on-disk vault is rcypher's standard format.
-rcypher = { version = "0.3", default-features = false, features = ["storage", "cli"] }
+rcypher = { version = "0.4", default-features = false, features = ["storage", "cli"] }
 clap = { version = "4", features = ["derive"] }
+# A progress spinner shown on stderr during the slow Argon2 steps of vault unlock
+# and creation, bridged into rcypher's `UnlockProgress` hook.
+indicatif = "0.18"
 # A `sigprocmask` to block SIGINT for the interactive shell, so Ctrl-C doesn't
 # trip the ptrace-protection watchdog (the shell stops `watch` with Enter).
 libc = "0.2"

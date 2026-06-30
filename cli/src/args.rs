@@ -166,7 +166,8 @@ pub enum AgentCmd {
 pub enum VaultCmd {
     /// Initialize the encrypted vault (one-time setup).
     ///
-    /// Prompts for a master password, generates an Ed25519 key pair (the private
+    /// Prompts for a master password (and, when built with the `fido2` feature,
+    /// offers to enrol a security key), generates an Ed25519 key pair (the private
     /// key is stored only in the vault), prints the public key with instructions
     /// to create your Revolut X API key, then stores that API key in the vault.
     Init {

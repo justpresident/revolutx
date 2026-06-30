@@ -33,6 +33,7 @@ mod helper;
 mod human;
 mod line;
 mod oneshot;
+mod progress;
 mod repl;
 
 use std::process::ExitCode;

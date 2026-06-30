@@ -62,7 +62,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "pem", "pkcs8", "zeroize"], optional = true }
 base64 = { version = "0.22", optional = true }
 zeroize = { version = "1", optional = true }
-rcypher = { version = "0.3", default-features = false, features = ["storage"], optional = true }
+rcypher = { version = "0.4", default-features = false, features = ["storage"], optional = true }
 bincode = { version = "2", optional = true }
 # OS randomness for `keystore`'s key-pair generation.
 getrandom = { version = "0.3", optional = true }

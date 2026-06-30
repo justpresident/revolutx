@@ -11,6 +11,12 @@ binary changes were logged together in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped the `rcypher` dependency to 0.4 (from 0.3). The `keystore` feature now
+  builds its store with rcypher's renamed `create_with_password` constructor
+  (was `create_with_params`); the public `Keystore` API is unchanged.
+
 ## [0.3.0] - 2026-06-28
 
 Builds three consistent surfaces on the 0.2 SDK — a shared command layer, an

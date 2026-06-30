@@ -95,7 +95,7 @@ impl Keystore {
         password: &str,
         argon2: &Argon2Params,
     ) -> std::result::Result<Self, KeystoreError> {
-        let store = UnlockedContainer::create_with_params(
+        let store = UnlockedContainer::create_with_password(
             factor_name,
             password,
             SecretStore::new(),

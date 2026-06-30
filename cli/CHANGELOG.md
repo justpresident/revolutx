@@ -7,6 +7,23 @@ library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.m
 
 ## [Unreleased]
 
+### Added
+
+- A progress spinner on stderr during the slow Argon2 steps of vault unlock and
+  creation, so the CLI no longer appears to hang while a key is derived. It is
+  injected into rcypher's `UnlockProgress` hook and shown only on an interactive
+  terminal (suppressed for piped output and CI).
+
+### Changed
+
+- `vault init` now drives rcypher 0.4's standard new-store flow
+  (`cli::prompt_until_initialized`) instead of a hand-rolled sequence. The
+  unrecoverable-password warning, double confirmation, and zxcvbn strength gate
+  are unchanged. When built with the `fido2` feature it now also offers to enrol
+  a security key at creation and, if you accept, lets you choose the unlock
+  policy (any one factor, or all) — previously a key could only be added
+  afterward with the `rcypher` CLI.
+
 ## [0.2.0] - 2026-06-28
 
 First release on the `revolutx` 0.3 SDK: adds an interactive shell and a
