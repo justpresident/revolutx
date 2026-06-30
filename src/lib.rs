@@ -124,7 +124,7 @@ pub use client::{ClientBuilder, Environment, RevolutXClient};
 pub use config::{ClientConfig, ConfigError, client_from_env};
 pub use error::{ApiError, ApiErrorKind, Error, Result};
 #[cfg(feature = "rest")]
-pub use keygen::{GeneratedKeyPair, generate_key_pair};
+pub use keygen::{GeneratedKeyPair, generate_key_pair, public_pem_from_private_pem};
 #[cfg(feature = "keystore")]
 pub use keystore::{Keystore, KeystoreError};
 pub use model::Page;

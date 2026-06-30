@@ -11,6 +11,14 @@ binary changes were logged together in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `public_pem_from_private_pem` (`rest` feature): derive the SPKI public-key PEM
+  from a PKCS#8 private-key PEM — the public key `generate_key_pair` would have
+  produced for it. Useful when only the private key is on hand.
+- `Keystore::PUBLIC_KEY_PEM` (`keystore` feature): record name for the stored
+  Ed25519 public key.
+
 ### Changed
 
 - Bumped the `rcypher` dependency to 0.4 (from 0.3). The `keystore` feature now

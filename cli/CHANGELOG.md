@@ -9,6 +9,9 @@ library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.m
 
 ### Added
 
+- `vault init` now also stores the Ed25519 public key in the vault (record
+  `public_key_pem`), so it's always on hand for reference. For `--key-file`
+  imports it is derived from the supplied private key.
 - A progress spinner on stderr during the slow Argon2 steps of vault unlock and
   creation, so the CLI no longer appears to hang while a key is derived. It is
   injected into rcypher's `UnlockProgress` hook and shown only on an interactive

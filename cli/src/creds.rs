@@ -126,14 +126,18 @@ fn init_vault(global: &GlobalOpts, key_file: Option<&Path>) -> Res<()> {
     )?;
     let mut keystore = Keystore::from_unlocked(container);
 
-    // 2. Put the private key into the store. Generate a fresh pair (default) or
-    //    import an existing PEM.
+    // 2. Put the key pair into the store. Generate a fresh pair (default) or import
+    //    an existing private PEM; either way the public key is stored too — derived
+    //    from the private key when importing — so the vault always records it.
     if let Some(key_file) = key_file {
-        let pem = Zeroizing::new(std::fs::read_to_string(key_file)?);
-        keystore.set(Keystore::PRIVATE_KEY_PEM, &pem)?;
+        let private_pem = Zeroizing::new(std::fs::read_to_string(key_file)?);
+        let public_pem = revolutx::public_pem_from_private_pem(&private_pem)?;
+        keystore.set(Keystore::PRIVATE_KEY_PEM, &private_pem)?;
+        keystore.set(Keystore::PUBLIC_KEY_PEM, &public_pem)?;
     } else {
         let pair = revolutx::generate_key_pair()?;
         keystore.set(Keystore::PRIVATE_KEY_PEM, &pair.private_pem)?;
+        keystore.set(Keystore::PUBLIC_KEY_PEM, &pair.public_pem)?;
         print_onboarding(&pair.public_pem);
     }
 

@@ -5,9 +5,9 @@
 //! client is, independent of the `keystore` feature.
 
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::pkcs8::spki::EncodePublicKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
@@ -51,6 +51,23 @@ pub fn generate_key_pair() -> Result<GeneratedKeyPair> {
     })
 }
 
+/// Derives the SPKI public-key PEM from a PKCS#8 private-key PEM.
+///
+/// Use when only the private key is on hand — for example importing one with
+/// `vault init --key-file` — to recover the matching public key to register with
+/// the exchange and to store alongside the private key. It is exactly the public
+/// key [`generate_key_pair`] would have returned for that private key.
+pub fn public_pem_from_private_pem(private_pem: &str) -> Result<String> {
+    let signing = SigningKey::from_pkcs8_pem(private_pem)
+        .map_err(|e| Error::key(format!("could not parse PKCS#8 PEM Ed25519 key: {e}")))?;
+    signing
+        .verifying_key()
+        .to_public_key_pem(LineEnding::LF)
+        .map_err(|e| Error::KeyGeneration {
+            message: format!("could not encode public key: {e}"),
+        })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -64,5 +81,17 @@ mod tests {
         assert!(a.public_pem.starts_with("-----BEGIN PUBLIC KEY-----"));
         assert_ne!(*a.private_pem, *b.private_pem);
         assert_ne!(a.public_pem, b.public_pem);
+    }
+
+    #[test]
+    fn derives_the_matching_public_key_from_a_private_pem() {
+        let pair = generate_key_pair().unwrap();
+        let derived = public_pem_from_private_pem(&pair.private_pem).unwrap();
+        assert_eq!(derived, pair.public_pem);
+    }
+
+    #[test]
+    fn rejects_an_unparseable_private_pem() {
+        assert!(public_pem_from_private_pem("-----BEGIN PRIVATE KEY-----\nnope\n").is_err());
     }
 }

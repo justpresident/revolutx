@@ -14,10 +14,12 @@
 //!   record at a time, on demand.
 //!
 //! The API key and Ed25519 private key are stored as the named records
-//! [`API_KEY`](Keystore::API_KEY) and [`PRIVATE_KEY_PEM`](Keystore::PRIVATE_KEY_PEM).
-//! [`Keystore`] exposes the store as a [`Signer`]: on **every** request the two
-//! records are decrypted, the request is signed, and the plaintext is wiped
-//! immediately — credentials never sit decrypted between requests.
+//! [`API_KEY`](Keystore::API_KEY) and [`PRIVATE_KEY_PEM`](Keystore::PRIVATE_KEY_PEM);
+//! the matching [`PUBLIC_KEY_PEM`](Keystore::PUBLIC_KEY_PEM) is kept alongside them
+//! (not secret, for reference). [`Keystore`] exposes the store as a [`Signer`]: on
+//! **every** request the API key and private key are decrypted, the request is
+//! signed, and the plaintext is wiped immediately — credentials never sit decrypted
+//! between requests.
 //!
 //! # Security model
 //!
@@ -76,6 +78,9 @@ impl Keystore {
     pub const API_KEY: &'static str = "api_key";
     /// Record name for the Ed25519 private key (PKCS#8 PEM).
     pub const PRIVATE_KEY_PEM: &'static str = "private_key_pem";
+    /// Record name for the Ed25519 public key (SPKI PEM). Not secret; kept for
+    /// reference (e.g. to re-register the key with the exchange).
+    pub const PUBLIC_KEY_PEM: &'static str = "public_key_pem";
 
     /// Wraps an already-unlocked rcypher container. The caller (the binary) loads
     /// the file as a [`rcypher::LockedContainer`], satisfies its factors, and
