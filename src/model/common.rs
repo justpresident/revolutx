@@ -6,6 +6,7 @@
 //! [`crate::Decimal`]) so prices, sizes, balances, and fees are never subject
 //! to binary floating-point rounding.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
@@ -21,9 +22,12 @@ use crate::error::{Error, Result};
 /// A trading pair or asset symbol, e.g. `BTC-USD`, `BTC/USD`, or `BTC`.
 ///
 /// The exchange uses the dash form (`BTC-USD`) in request paths and order
-/// placement, and the slash form (`BTC/USD`) in some responses. [`Symbol`] is a
-/// validated, non-empty string wrapper and does not normalize between the two
-/// forms.
+/// placement, and the slash form (`BTC/USD`) in some responses (and the
+/// [`CurrencyPairs`](crate::model::configuration::CurrencyPairs) map key).
+/// [`Symbol`] is a validated, non-empty wrapper;
+/// [`from_pair`](Self::from_pair) builds one from a pair's base and quote, and
+/// [`dashed`](Self::dashed) / [`slashed`](Self::slashed) convert between the two
+/// forms so callers never hand-roll the separator swap.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Symbol(String);
@@ -38,15 +42,47 @@ impl Symbol {
         Ok(Self(value))
     }
 
-    /// Returns the symbol as a string slice.
+    /// Builds a symbol from a pair's `base` and `quote` assets in the dash form the
+    /// exchange uses in request paths — `Symbol::from_pair("BTC", "USD")` is
+    /// `BTC-USD`. The convenient way to turn a
+    /// [`CurrencyPair`](crate::model::configuration::CurrencyPair) into the
+    /// path/placement symbol.
+    pub fn from_pair(base: &str, quote: &str) -> Self {
+        Self(format!("{base}-{quote}"))
+    }
+
+    /// Returns the symbol as a string slice (in whatever form it was created with).
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// This symbol in the **dash** form (`BTC-USD`) the exchange uses in request
+    /// paths and order placement. Borrows when already dashed; converts a slash
+    /// otherwise.
+    pub fn dashed(&self) -> Cow<'_, str> {
+        if self.0.contains('/') {
+            Cow::Owned(self.0.replace('/', "-"))
+        } else {
+            Cow::Borrowed(&self.0)
+        }
+    }
+
+    /// This symbol in the **slash** form (`BTC/USD`) the exchange uses in some
+    /// responses and that reads naturally for humans. Borrows when already
+    /// slashed; converts a dash otherwise.
+    pub fn slashed(&self) -> Cow<'_, str> {
+        if self.0.contains('-') {
+            Cow::Owned(self.0.replace('-', "/"))
+        } else {
+            Cow::Borrowed(&self.0)
+        }
     }
 }
 
 impl fmt::Display for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        // `pad` (not `write_str`) so width/fill/alignment like `{symbol:<12}` work.
+        f.pad(&self.0)
     }
 }
 
@@ -410,6 +446,22 @@ mod tests {
         assert!(Symbol::new("").is_err());
         assert!(Symbol::new("   ").is_err());
         assert_eq!(Symbol::new("BTC-USD").unwrap().as_str(), "BTC-USD");
+    }
+
+    #[test]
+    fn symbol_normalizes_between_dash_and_slash_forms() {
+        assert_eq!(Symbol::from_pair("BTC", "USD").as_str(), "BTC-USD");
+
+        let dashed = Symbol::new("BTC-USD").unwrap();
+        assert_eq!(dashed.dashed(), "BTC-USD"); // already dashed
+        assert_eq!(dashed.slashed(), "BTC/USD"); // converted
+
+        let slashed = Symbol::new("BTC/USD").unwrap();
+        assert_eq!(slashed.dashed(), "BTC-USD"); // converted
+        assert_eq!(slashed.slashed(), "BTC/USD"); // already slashed
+
+        // Display honors padding/alignment (used by the CLI tables).
+        assert_eq!(format!("{dashed:<8}|"), "BTC-USD |");
     }
 
     #[test]

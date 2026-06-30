@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use super::common::Symbol;
+
 /// Whether an asset is a fiat or crypto currency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -70,6 +72,16 @@ pub struct CurrencyPair {
     pub min_order_size_quote: Decimal,
     /// Whether the pair is available for use.
     pub status: ListingStatus,
+}
+
+impl CurrencyPair {
+    /// The trading [`Symbol`] for this pair, in the dash form the exchange's
+    /// request paths and order placement use (base `BTC` + quote `USD` →
+    /// `BTC-USD`). The [`CurrencyPairs`] map is keyed by the slash form, so this is
+    /// the convenient way to get the path/placement symbol from a pair.
+    pub fn symbol(&self) -> Symbol {
+        Symbol::from_pair(&self.base, &self.quote)
+    }
 }
 
 /// The supported currencies, keyed by currency code (e.g. `BTC`).

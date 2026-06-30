@@ -18,6 +18,12 @@ binary changes were logged together in this file.
   produced for it. Useful when only the private key is on hand.
 - `Keystore::PUBLIC_KEY_PEM` (`keystore` feature): record name for the stored
   Ed25519 public key.
+- Symbol normalization so callers (the CLI, and downstream tools like a data
+  collector) never hand-roll the separator swap: `Symbol::from_pair(base, quote)`
+  builds the dash form (`BTC-USD`), and `Symbol::dashed()` / `slashed()` convert
+  between the exchange's dash form (request paths) and slash form (`BTC/USD`, used
+  in some responses and the `CurrencyPairs` map key); `CurrencyPair::symbol()`
+  returns the pair's `Symbol`. `Symbol`'s `Display` now honors padding (`{s:<12}`).
 
 ### Changed
 

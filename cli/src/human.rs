@@ -41,7 +41,7 @@ impl Presenter for HumanPresenter {
                 for (_, p) in sorted(pairs) {
                     // Show the hyphenated symbol the endpoints accept (the map key
                     // is the slash form), so it's the obvious thing to copy.
-                    let symbol = format!("{}-{}", p.base, p.quote);
+                    let symbol = p.symbol();
                     lines.push(format!(
                         "{symbol:<12} min {} max {} {:?}",
                         p.min_order_size, p.max_order_size, p.status

@@ -222,14 +222,11 @@ fn confirm() -> Res<bool> {
 /// Fetches the trading-pair symbols for autocomplete; degrades to none on error.
 ///
 /// The pairs map is keyed in slash form (`BTC/USD`), but every endpoint takes the
-/// hyphenated symbol (`BTC-USD`), so build that from each pair's base/quote.
+/// hyphenated symbol (`BTC-USD`); `CurrencyPair::symbol()` builds that form.
 async fn fetch_symbols(client: &RevolutXClient) -> Arc<[String]> {
     match client.configuration().pairs().await {
         Ok(pairs) => {
-            let mut symbols: Vec<String> = pairs
-                .values()
-                .map(|p| format!("{}-{}", p.base, p.quote))
-                .collect();
+            let mut symbols: Vec<String> = pairs.values().map(|p| p.symbol().to_string()).collect();
             symbols.sort();
             symbols.dedup();
             symbols.into()
