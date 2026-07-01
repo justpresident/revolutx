@@ -150,7 +150,7 @@ pub enum AgentCmd {
         auth_token: bool,
         /// Auto-lock (exit) after this many seconds with no *authorized* client
         /// connected (a merely-pending connection does not count). 0 disables it.
-        #[arg(long, default_value_t = 300)]
+        #[arg(long, default_value_t = 3600)]
         idle_timeout: u64,
         /// The capability ceiling: the highest tier grantable to any connection
         /// (and the tier a token grants). The agent enforces it per connection; a
