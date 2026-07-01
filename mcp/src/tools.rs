@@ -25,6 +25,9 @@ use serde_json::{Value, json};
 pub const AUTHENTICATE: &str = "authenticate";
 /// Argument key carrying the one-time token for the [`AUTHENTICATE`] tool.
 pub const ARG_TOKEN: &str = "token";
+/// Argument key carrying the requested access tier for interactive
+/// authorization in the [`AUTHENTICATE`] tool.
+pub const ARG_ACCESS: &str = "access";
 
 // Tool names — the single source of truth for each tool's catalog entry
 // (`list`) and its `to_command` mapping arm.
@@ -55,13 +58,13 @@ pub fn list() -> Vec<Value> {
     let mut tools = vec![
         tool(
             AUTHENTICATE,
-            "Authenticate this session with the signing agent's one-time token. Call this FIRST: the operator starts the agent with `revolutx agent start --auth-token`, which prints a token to paste here. Until you call it successfully, every other tool fails with \"authenticate first\". The token is single-use.",
+            "Authenticate this session with the signing agent. Call this FIRST, one of two ways: (a) pass the one-time `token` the operator got from `revolutx agent start --auth-token`; or (b) omit the token to request INTERACTIVE approval — the operator sees this connection in the agent console and runs `grant`. In case (b) you get an \"awaiting operator approval\" reply; once the operator approves, call `authenticate` again to complete. Until authenticated, every other tool fails with \"authenticate first\".",
             json!({
                 "type": "object",
                 "properties": {
-                    ARG_TOKEN: { "type": "string", "description": "The one-time token printed by the agent at startup." }
-                },
-                "required": [ARG_TOKEN]
+                    ARG_TOKEN: { "type": "string", "description": "One-time token from `agent start --auth-token`. Omit to request interactive operator approval instead." },
+                    ARG_ACCESS: { "type": "string", "enum": ["market", "view", "trading"], "description": "Access tier to request when using interactive approval (default: view). The operator grants at or below the agent's ceiling." }
+                }
             }),
         ),
         tool(

@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use revolutx::agent::{AgentExecutor, default_socket_path};
+use revolutx::agent::{AgentExecutor, AuthOutcome, default_socket_path};
 use revolutx::commands::{JsonPresenter, Presenter};
-use revolutx::{RequestExecutor, RevolutXClient};
+use revolutx::{AccessLevel, RequestExecutor, RevolutXClient};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -19,12 +19,14 @@ const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "revolutx-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Tool error: the `authenticate` call was missing its token argument.
-const MISSING_TOKEN: &str = "authenticate requires a 'token' string argument";
+/// Label this connection presents to the agent's operator console.
+const MCP_LABEL: &str = "revolutx-mcp";
+/// The access tier interactive authorization requests when none is given.
+const DEFAULT_REQUEST_ACCESS: AccessLevel = AccessLevel::View;
 /// Tool error: a tool other than `authenticate` was called before this session has
 /// authenticated with the agent.
-const NOT_AUTHENTICATED: &str = "authenticate first: call the `authenticate` tool with the one-time token from \
-     `revolutx agent start --auth-token`";
+const NOT_AUTHENTICATED: &str = "authenticate first: call the `authenticate` tool — with the one-time token \
+     from `revolutx agent start --auth-token`, or with no token to request interactive operator approval";
 
 /// An MCP server that proxies to a `revolutx` signing agent over a unix socket.
 ///
@@ -43,6 +45,10 @@ pub struct Server {
     /// replaced on each re-authenticate. `None` until the first successful
     /// authentication.
     session: Mutex<Option<Arc<AgentExecutor>>>,
+    /// A connection awaiting interactive operator approval, held across
+    /// `authenticate` polls so re-calling reuses the *same* console entry rather
+    /// than creating a new pending one. Cleared once approved, denied, or dropped.
+    pending: Mutex<Option<Arc<AgentExecutor>>>,
 }
 
 impl Server {
@@ -51,6 +57,7 @@ impl Server {
         Self {
             socket,
             session: Mutex::new(None),
+            pending: Mutex::new(None),
         }
     }
 
@@ -130,7 +137,7 @@ impl Server {
             "protocolVersion": protocol_version,
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-            "instructions": "Tools for the Revolut X crypto exchange, served via a signing agent. Call `authenticate` FIRST with the one-time token the operator obtained from `revolutx agent start --auth-token`; until you do, every other tool fails with \"authenticate first\". The agent serves a fixed access tier (reported on authenticate): account reads need `--access view` and order placement/cancellation need `--access trading`; tools above the tier return \"access denied\"."
+            "instructions": "Tools for the Revolut X crypto exchange, served via a signing agent. Call `authenticate` FIRST — either with the one-time `token` from `revolutx agent start --auth-token`, or with NO token to request interactive operator approval (the operator grants this connection in the agent console; you get an \"awaiting operator approval\" reply, then call `authenticate` again). Until you do, every other tool fails with \"authenticate first\". The agent enforces a per-connection access tier (reported on authenticate): account reads need `view` and order placement/cancellation need `trading`; tools above the granted tier return \"access denied\"."
         })
     }
 
@@ -170,48 +177,138 @@ impl Server {
         }
     }
 
-    /// Handles the `authenticate` tool: opens a fresh connection to the agent and
-    /// presents the one-time token.
+    /// Handles the `authenticate` tool. With a `token` it presents it for immediate
+    /// authorization; without one it requests interactive operator approval and
+    /// reports the status (call again once the operator grants it).
     ///
     /// This is the only place the socket is opened, so the agent can be started or
-    /// restarted independently of the MCP — re-calling `authenticate` (with the new
-    /// token a restarted agent prints) reconnects and supersedes any prior session.
-    /// On success the agent reveals its environment and access policy, and every
-    /// other tool becomes usable (subject to that policy).
+    /// restarted independently of the MCP. On success every other tool becomes usable,
+    /// subject to the agent's per-connection access policy.
     async fn authenticate(&self, id: Value, args: &Value) -> Value {
-        let Some(token) = args.get(tools::ARG_TOKEN).and_then(Value::as_str) else {
-            return success(id, tool_content(MISSING_TOKEN, true));
-        };
-        let executor = match AgentExecutor::connect(&self.socket).await {
-            Ok(executor) => Arc::new(executor),
-            Err(e) => {
-                return success(
-                    id,
-                    tool_content(
-                        format!(
-                            "could not connect to the agent at {sock}: {e}. Start it with \
-                             `revolutx agent start --auth-token --socket {sock}`.",
-                            sock = self.socket.display(),
-                        ),
-                        true,
-                    ),
-                );
+        match args
+            .get(tools::ARG_TOKEN)
+            .and_then(Value::as_str)
+            .filter(|t| !t.trim().is_empty())
+        {
+            Some(token) => self.authenticate_with_token(id, token).await,
+            None => {
+                self.authenticate_interactively(id, requested_access(args))
+                    .await
             }
+        }
+    }
+
+    /// Token path: connect fresh and present the one-time token (grants the ceiling).
+    async fn authenticate_with_token(&self, id: Value, token: &str) -> Value {
+        let executor = match self.connect().await {
+            Ok(executor) => executor,
+            Err(message) => return success(id, tool_content(message, true)),
         };
         match executor.authenticate(token).await {
             Ok(()) => {
-                let text = format!(
-                    "Authenticated with the signing agent. Environment: {}; access: {} \
-                     (the agent enforces this — tools above this tier are refused).",
-                    executor.base_url(),
-                    executor.access().as_str(),
-                );
-                // Supersede any prior connection (e.g. to a now-restarted agent).
-                *self.session.lock().await = Some(executor);
-                success(id, tool_content(text, false))
+                *self.pending.lock().await = None;
+                self.store_session(id, executor).await
             }
             Err(e) => success(id, tool_content(e.to_string(), true)),
         }
+    }
+
+    /// Interactive path: request operator approval at `requested` and report status.
+    /// The pending connection is kept between calls so re-polling reuses the same
+    /// console entry; call again after the operator grants it.
+    async fn authenticate_interactively(&self, id: Value, requested: AccessLevel) -> Value {
+        // Bind to a statement so the guard drops here — re-locking `pending` below
+        // (a non-reentrant mutex) while still holding it would deadlock.
+        let existing = self.pending.lock().await.clone();
+        let executor = match existing {
+            Some(executor) => executor,
+            None => match self.connect().await {
+                Ok(executor) => {
+                    *self.pending.lock().await = Some(Arc::clone(&executor));
+                    executor
+                }
+                Err(message) => return success(id, tool_content(message, true)),
+            },
+        };
+        match executor
+            .request_authorization(Some(MCP_LABEL), requested)
+            .await
+        {
+            Ok(AuthOutcome::Authorized(_)) => {
+                *self.pending.lock().await = None;
+                self.store_session(id, executor).await
+            }
+            Ok(AuthOutcome::Pending) => success(
+                id,
+                tool_content(
+                    format!(
+                        "Awaiting operator approval. In the agent console, run `list` and \
+                         `grant <id> {}` for the `{MCP_LABEL}` connection, then call \
+                         `authenticate` again.",
+                        requested.as_str()
+                    ),
+                    false,
+                ),
+            ),
+            Ok(AuthOutcome::Denied(reason)) => {
+                *self.pending.lock().await = None;
+                success(
+                    id,
+                    tool_content(
+                        format!("The operator denied this connection: {reason}"),
+                        true,
+                    ),
+                )
+            }
+            Err(e) => {
+                // A stale/closed connection: drop it so the next call reconnects.
+                *self.pending.lock().await = None;
+                success(
+                    id,
+                    tool_content(
+                        format!("agent connection failed: {e}. Call `authenticate` again."),
+                        true,
+                    ),
+                )
+            }
+        }
+    }
+
+    /// Opens a fresh connection to the agent, or returns a human-readable error.
+    async fn connect(&self) -> Result<Arc<AgentExecutor>, String> {
+        AgentExecutor::connect(&self.socket)
+            .await
+            .map(Arc::new)
+            .map_err(|e| {
+                format!(
+                    "could not connect to the agent at {sock}: {e}. Start it with \
+                     `revolutx agent start --socket {sock}`.",
+                    sock = self.socket.display(),
+                )
+            })
+    }
+
+    /// Records `executor` as the active session and reports the granted policy.
+    async fn store_session(&self, id: Value, executor: Arc<AgentExecutor>) -> Value {
+        let text = format!(
+            "Authenticated with the signing agent. Environment: {}; access: {} \
+             (the agent enforces this — tools above this tier are refused).",
+            executor.base_url(),
+            executor.access().as_str(),
+        );
+        // Supersede any prior connection (e.g. to a now-restarted agent).
+        *self.session.lock().await = Some(executor);
+        success(id, tool_content(text, false))
+    }
+}
+
+/// The access tier an interactive `authenticate` requests (default view).
+fn requested_access(args: &Value) -> AccessLevel {
+    match args.get(tools::ARG_ACCESS).and_then(Value::as_str) {
+        Some("market") => AccessLevel::Market,
+        Some("trading") => AccessLevel::Trading,
+        Some("view") => AccessLevel::View,
+        _ => DEFAULT_REQUEST_ACCESS,
     }
 }
 
@@ -227,7 +324,69 @@ fn env_nonempty(name: &str) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use revolutx::agent::AgentServer;
+    use revolutx::transport::BoxFuture;
+    use revolutx::{RawResponse, RequestSpec, Result as RxResult};
+
     use super::*;
+
+    /// A stub agent executor that echoes the request path — enough for a live
+    /// in-process [`AgentServer`] to exercise the MCP's authorization wiring.
+    #[derive(Debug)]
+    struct StubExec;
+
+    impl RequestExecutor for StubExec {
+        fn execute(&self, request: RequestSpec) -> BoxFuture<'_, RxResult<RawResponse>> {
+            let body = request.path().as_bytes().to_vec();
+            Box::pin(async move {
+                Ok(RawResponse {
+                    status: 200,
+                    retry_after: None,
+                    body,
+                })
+            })
+        }
+        #[allow(clippy::unnecessary_literal_bound)]
+        fn base_url(&self) -> &str {
+            "http://stub/api/1.0"
+        }
+        fn is_authenticated(&self) -> bool {
+            true
+        }
+    }
+
+    async fn wait_for_socket(path: &Path) {
+        for _ in 0..200 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("socket never appeared");
+    }
+
+    /// Invokes one `tools/call` and returns the parsed response.
+    async fn call(server: &Server, name: &str, args: Value) -> Value {
+        handle(
+            server,
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": name, "arguments": args }
+            }),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn text_of(resp: &Value) -> String {
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
 
     fn public_server() -> Server {
         // Points at a socket with no agent listening: `authenticate` reports a
@@ -316,44 +475,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticate_validates_token_and_reports_connection_failure() {
-        // Missing token argument is a tool error, not a protocol error.
-        let resp = handle(
-            &public_server(),
-            json!({
-                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-                "params": { "name": "authenticate", "arguments": {} }
-            }),
-        )
-        .await
-        .unwrap();
-        assert!(resp.get("error").is_none());
-        assert_eq!(resp["result"]["isError"], true);
-        assert!(
-            resp["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("token")
-        );
+    async fn authenticate_reports_connection_failure_when_no_agent() {
+        // Both paths open the socket lazily; with no agent listening, each is a tool
+        // error describing the connection failure — token OR interactive (no token).
+        let server = public_server();
+        for args in [json!({}), json!({ "token": "x" })] {
+            let resp = call(&server, "authenticate", args).await;
+            assert!(resp.get("error").is_none());
+            assert_eq!(resp["result"]["isError"], true);
+            assert!(text_of(&resp).contains("could not connect to the agent"));
+        }
+    }
 
-        // With a token but no agent listening on the socket, it is a tool error
-        // describing the connection failure (the socket is opened lazily, here).
-        let resp = handle(
-            &public_server(),
-            json!({
-                "jsonrpc": "2.0", "id": 6, "method": "tools/call",
-                "params": { "name": "authenticate", "arguments": { "token": "x" } }
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(resp["result"]["isError"], true);
-        assert!(
-            resp["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("could not connect to the agent")
-        );
+    #[tokio::test]
+    async fn interactive_authenticate_pending_then_operator_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (agent, control) = AgentServer::new(Arc::new(StubExec), AccessLevel::View, None);
+        let server_task = tokio::spawn({
+            let socket = socket.clone();
+            async move { agent.run(&socket).await }
+        });
+        wait_for_socket(&socket).await;
+
+        let mcp = Server::with_socket(socket.clone());
+
+        // No token -> registers a pending connection and reports "awaiting approval".
+        let r1 = call(&mcp, "authenticate", json!({})).await;
+        assert_eq!(r1["result"]["isError"], false);
+        assert!(text_of(&r1).contains("Awaiting operator approval"));
+
+        // The operator sees the labelled connection and grants it.
+        let info = control
+            .list()
+            .into_iter()
+            .find(|c| c.label.as_deref() == Some("revolutx-mcp"))
+            .expect("pending mcp connection");
+        control.grant(info.id, None).unwrap();
+
+        // Re-calling authenticate reuses the SAME connection and completes.
+        let r2 = call(&mcp, "authenticate", json!({})).await;
+        assert_eq!(r2["result"]["isError"], false);
+        assert!(text_of(&r2).contains("access: view"));
+
+        // A real tool now runs on the session — it is past "authenticate first".
+        let r3 = call(&mcp, "get_tickers", json!({})).await;
+        assert!(!text_of(&r3).contains("authenticate first"));
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn interactive_authenticate_reports_denial() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (agent, control) = AgentServer::new(Arc::new(StubExec), AccessLevel::Market, None);
+        let server_task = tokio::spawn({
+            let socket = socket.clone();
+            async move { agent.run(&socket).await }
+        });
+        wait_for_socket(&socket).await;
+
+        let mcp = Server::with_socket(socket.clone());
+        call(&mcp, "authenticate", json!({})).await; // register pending
+        let id = control.list()[0].id;
+        control.deny(id).unwrap();
+
+        let denied = call(&mcp, "authenticate", json!({})).await;
+        assert_eq!(denied["result"]["isError"], true);
+        assert!(text_of(&denied).contains("denied"));
+
+        server_task.abort();
     }
 
     #[tokio::test]

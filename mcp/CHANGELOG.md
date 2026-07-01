@@ -7,13 +7,22 @@ it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-07-01
+## [0.3.0] - 2026-07-01
+
+### Added
+
+- Interactive authorization: call `authenticate` with **no token** to request operator
+  approval. The MCP appears in the agent console (labelled `revolutx-mcp`) for the
+  operator to `grant`/`deny`; it replies "awaiting operator approval", and a second
+  `authenticate` completes once approved (the pending connection is reused, so it stays
+  one console entry). An optional `access` argument sets the requested tier (default
+  `view`).
 
 ### Changed
 
-- Builds on `revolutx` 0.5. The `authenticate` (token) flow is unchanged, but the
-  agent it connects to is now persistent and multi-client, so it no longer exits the
-  moment the MCP disconnects.
+- Builds on `revolutx` 0.5; the `token` argument to `authenticate` is now optional (the
+  token path itself is unchanged). The agent it connects to is now persistent and
+  multi-client, so it no longer exits the moment the MCP disconnects.
 
 ## [0.2.0] - 2026-06-28
 
