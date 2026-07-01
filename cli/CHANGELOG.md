@@ -7,6 +7,14 @@ library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.m
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-01
+
+### Fixed
+
+- `agent start` (via revolutx 0.5.1) refuses an oversized forwarded response gracefully
+  instead of desynchronizing the client's connection, and handles larger (up to 8 MiB)
+  market-data responses.
+
 ## [0.3.0] - 2026-07-01
 
 `agent start` becomes a persistent, multi-client agent with an interactive operator

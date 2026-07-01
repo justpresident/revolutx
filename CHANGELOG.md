@@ -11,6 +11,18 @@ binary changes were logged together in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-01
+
+### Fixed
+
+- The agent now refuses a forwarded response whose body would overflow the response
+  frame with a `Failed` reply, instead of sending an oversized frame that desynchronized
+  the client connection and broke every later request. The response-frame ceiling is
+  raised to 8 MiB (market-data responses — deep candle windows, all-pairs ticker lists —
+  can be several MiB). `AgentExecutor` also marks its connection unusable after a
+  transport error, so a desync fails fast with a clear "reconnect" error rather than
+  reading misframed bytes.
+
 ## [0.5.0] - 2026-07-01
 
 Reworks the signing agent into a **persistent, multi-client authorizer** with

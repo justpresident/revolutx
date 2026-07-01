@@ -72,10 +72,17 @@ use crate::transport::{BoxFuture, RawResponse, RequestExecutor, RequestSpec};
 /// headroom that also bounds the agent's exposure to a hostile length prefix.
 const MAX_REQUEST_FRAME: u32 = 64 * 1024;
 
-/// Largest response frame a client will read (1 MiB). REST responses are
-/// paginated (order books, candle history, ticker lists, history pages) and stay
-/// well under this; it is a defensive ceiling, not an expected size.
-const MAX_RESPONSE_FRAME: u32 = 1024 * 1024;
+/// Largest response frame a client will read (8 MiB). REST market-data responses
+/// (deep candle windows, ticker lists across every pair, order books, history pages)
+/// can be several MiB; this is a generous ceiling, not an expected size. The agent
+/// refuses a body that would exceed it (see [`MAX_RESPONSE_BODY`]) *before* sending,
+/// so a too-large response never overflows the frame and desynchronizes the stream.
+const MAX_RESPONSE_FRAME: u32 = 8 * 1024 * 1024;
+
+/// Largest forwarded response body the agent will return. A larger one is refused
+/// with a `Failed` reply rather than an oversized frame, keeping the connection
+/// framed and reusable. Leaves headroom under [`MAX_RESPONSE_FRAME`] for the envelope.
+const MAX_RESPONSE_BODY: usize = MAX_RESPONSE_FRAME as usize - 4096;
 
 /// Once a frame's length prefix has been read, the rest of the frame must arrive
 /// within this window. A stalled partial frame must not pin a connection (and
@@ -324,6 +331,10 @@ pub struct AgentExecutor {
     /// successful authorization, so unset until then.
     caps: OnceLock<Capabilities>,
     authenticated: AtomicBool,
+    /// Set once a write/read transport error leaves the stream in an unknown state.
+    /// A desynchronized stream can never be trusted again, so further requests fail
+    /// fast (with a clear "reconnect" error) instead of reading misframed garbage.
+    broken: AtomicBool,
 }
 
 impl AgentExecutor {
@@ -343,6 +354,7 @@ impl AgentExecutor {
             conn: tokio::sync::Mutex::new(stream),
             caps: OnceLock::new(),
             authenticated: AtomicBool::new(false),
+            broken: AtomicBool::new(false),
         })
     }
 
@@ -428,17 +440,32 @@ impl AgentExecutor {
     }
 
     async fn round_trip(&self, request: &AgentRequest) -> Result<AgentResponse> {
+        if self.broken.load(Ordering::Acquire) {
+            return Err(Error::agent(
+                "agent connection is unusable after a transport error; reconnect to continue",
+            ));
+        }
         // Hold the connection lock only for the write/read critical section, so a
         // request fully completes before the next one starts on the shared
-        // stream; decoding happens after the guard is released.
+        // stream; decoding happens after the guard is released. A write or read
+        // error leaves the stream desynchronized, so mark it broken rather than
+        // reuse it. (A decode failure is *not* a transport error — the frame was
+        // read whole, so the stream stays in sync.)
         let bytes = {
             let mut conn = self.conn.lock().await;
-            write_frame(&mut conn, request)
-                .await
-                .map_err(|e| Error::agent(format!("failed to send request to agent: {e}")))?;
-            read_frame_bytes(&mut conn, MAX_RESPONSE_FRAME)
-                .await
-                .map_err(|e| Error::agent(format!("failed to read agent response: {e}")))?
+            if let Err(e) = write_frame(&mut conn, request).await {
+                self.broken.store(true, Ordering::Release);
+                return Err(Error::agent(format!(
+                    "failed to send request to agent: {e}"
+                )));
+            }
+            match read_frame_bytes(&mut conn, MAX_RESPONSE_FRAME).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    self.broken.store(true, Ordering::Release);
+                    return Err(Error::agent(format!("failed to read agent response: {e}")));
+                }
+            }
         };
         decode(&bytes).map_err(|e| Error::agent(format!("invalid agent response: {e}")))
     }
@@ -1009,6 +1036,13 @@ async fn execute_forwarded(
     let spec =
         RequestSpec::from_parts(method, wire.path, wire.query, wire.body, wire.requires_auth);
     match executor.execute(spec).await {
+        // Refuse an oversized body gracefully — sending it would overflow the client's
+        // response frame and desync the connection for every later request.
+        Ok(raw) if raw.body.len() > MAX_RESPONSE_BODY => AgentResponse::Failed(format!(
+            "response too large: {} bytes exceeds the agent's {} MiB limit; narrow the request",
+            raw.body.len(),
+            MAX_RESPONSE_FRAME / (1024 * 1024),
+        )),
         Ok(raw) => AgentResponse::Executed(WireResponse {
             status: raw.status,
             retry_after_millis: raw
@@ -1303,5 +1337,70 @@ mod tests {
             .await
             .expect("server should return after shutdown");
         assert!(outcome.unwrap().is_ok());
+    }
+
+    /// Returns an oversized body for `/candles/*` (a market-tier path) and a small
+    /// echo otherwise — to exercise the response-size guard.
+    #[derive(Debug)]
+    struct BigBodyExecutor;
+
+    impl RequestExecutor for BigBodyExecutor {
+        fn execute(&self, request: RequestSpec) -> BoxFuture<'_, Result<RawResponse>> {
+            let body = if request.path().starts_with("/candles") {
+                vec![b'x'; MAX_RESPONSE_BODY + 1]
+            } else {
+                request.path().as_bytes().to_vec()
+            };
+            Box::pin(async move {
+                Ok(RawResponse {
+                    status: 200,
+                    retry_after: None,
+                    body,
+                })
+            })
+        }
+        #[allow(clippy::unnecessary_literal_bound)]
+        fn base_url(&self) -> &str {
+            "http://stub/api/1.0"
+        }
+        fn is_authenticated(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_response_is_refused_and_the_connection_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (server, control) =
+            AgentServer::new(Arc::new(BigBodyExecutor), AccessLevel::Market, None);
+        let task = tokio::spawn({
+            let socket = socket.clone();
+            async move { server.run(&socket).await }
+        });
+        wait_for(&socket).await;
+
+        let exec = AgentExecutor::connect(&socket).await.unwrap();
+        exec.request_authorization(None, AccessLevel::Market)
+            .await
+            .unwrap();
+        control.grant(control.list()[0].id, None).unwrap();
+        exec.request_authorization(None, AccessLevel::Market)
+            .await
+            .unwrap();
+
+        // The oversized candle response is refused gracefully, not sent as a giant frame.
+        let err = exec
+            .execute(RequestSpec::get("/candles/BTC-USD"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too large"), "got: {err}");
+
+        // The connection is NOT poisoned — normal requests still round-trip.
+        let raw = exec.execute(RequestSpec::get("/tickers")).await.unwrap();
+        assert_eq!(raw.body, b"/tickers");
+        assert!(exec.execute(RequestSpec::get("/tickers")).await.is_ok());
+
+        task.abort();
     }
 }
