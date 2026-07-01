@@ -132,27 +132,29 @@ impl Command {
 
 #[derive(Subcommand)]
 pub enum AgentCmd {
-    /// Unlock the vault and serve a single authenticated client over a unix
-    /// socket until it disconnects or the process is stopped (Ctrl-C). Runs in
-    /// the foreground.
+    /// Unlock the vault and serve connections over a unix socket, authorizing each
+    /// interactively from the console (or via a one-time token), until stopped
+    /// (Ctrl-C or `quit`). Runs in the foreground with an operator console.
     Start {
         /// Unix socket path (default: $`XDG_RUNTIME_DIR/revolutx-agent.sock`).
+        /// Put it in a directory other UIDs can reach (e.g. a shared project dir)
+        /// to allow cross-UID clients; the socket itself is world-connectable and
+        /// nothing is served without a token or an operator grant.
         #[arg(long)]
         socket: Option<PathBuf>,
-        /// Generate a one-time authentication token and print it. The connecting
-        /// client (e.g. the MCP) must present this token before the agent serves
-        /// any request, so another same-UID process cannot use the signing
-        /// oracle. Currently required (the only way to authenticate a client).
+        /// Also accept a one-time token as an auth method: generate one, print it,
+        /// and let a headless client (e.g. the MCP) present it to authorize at the
+        /// access ceiling. It is single-use. Without this flag, connections are
+        /// authorized only interactively from the console.
         #[arg(long)]
         auth_token: bool,
-        /// Auto-lock (exit) if no client authenticates within this many seconds.
-        /// The timeout applies only until the first client authenticates — once a
-        /// client is connected it is never timed out for being idle. 0 disables
-        /// it.
+        /// Auto-lock (exit) after this many seconds with no *authorized* client
+        /// connected (a merely-pending connection does not count). 0 disables it.
         #[arg(long, default_value_t = 300)]
         idle_timeout: u64,
-        /// Capability tier the agent serves, the authoritative gate a client
-        /// cannot widen (cumulative; default: market — least privilege).
+        /// The capability ceiling: the highest tier grantable to any connection
+        /// (and the tier a token grants). The agent enforces it per connection; a
+        /// grant cannot exceed it (cumulative; default: market — least privilege).
         ///
         /// `market` permits only public market data and exchange reference data;
         /// `view` adds read-only account data (balances, orders, trades, fills);

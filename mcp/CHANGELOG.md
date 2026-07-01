@@ -7,6 +7,14 @@ it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-01
+
+### Changed
+
+- Builds on `revolutx` 0.5. The `authenticate` (token) flow is unchanged, but the
+  agent it connects to is now persistent and multi-client, so it no longer exits the
+  moment the MCP disconnects.
+
 ## [0.2.0] - 2026-06-28
 
 First release on the `revolutx` 0.3 SDK: runs on the shared command layer and

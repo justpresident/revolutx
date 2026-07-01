@@ -1,52 +1,55 @@
 //! Signing-agent proxy (`agent` feature, unix-only).
 //!
 //! A long-running **agent** owns the keystore and performs all signing and HTTP.
-//! A client-side [`AgentExecutor`] forwards [`RequestSpec`]s to it over a unix
-//! socket and receives only response bytes. This is a *full proxy*: neither the
-//! private key **nor** the API key ever crosses the socket. The motivating use
-//! is a headless server (e.g. an MCP) that has no TTY to prompt for the vault
+//! Client-side [`AgentExecutor`]s forward [`RequestSpec`]s to it over a unix socket
+//! and receive only response bytes. This is a *full proxy*: neither the private key
+//! **nor** the API key ever crosses the socket. The motivating use is a headless
+//! client (an MCP, or the market-data collector) with no TTY to prompt for the vault
 //! password — it delegates to an agent that was unlocked interactively once.
 //!
-//! - The daemon side is [`serve`], driven by the `revolutx agent start` CLI
-//!   subcommand: it unlocks the vault, builds a normal client, and forwards each
-//!   request to that client's executor.
-//! - The client side is [`AgentExecutor`], an [`Arc<dyn RequestExecutor>`] you
-//!   plug into [`crate::ClientBuilder::executor`].
+//! The agent serves **many** connections at once. [`AgentServer`] runs the accept
+//! loop; [`AgentControl`] is the operator's handle to it (list connections, grant,
+//! deny, shut down) — what the `revolutx agent start` REPL drives.
 //!
 //! # Wire protocol
 //!
-//! Each message is a `u32` big-endian length prefix followed by that many bytes
-//! of bincode. Requests are [`AgentRequest`] (`Authenticate`, `Ping`, or
-//! `Execute`), responses are [`AgentResponse`] (`Authenticated`, `Pong`,
-//! `Executed`, or `Failed`).
+//! Each message is a `u32` big-endian length prefix followed by that many bytes of
+//! bincode. Requests are [`AgentRequest`] (`Authenticate`, `RequestAuth`, `Ping`,
+//! `Execute`); responses are [`AgentResponse`] (`Authenticated`, `AuthPending`,
+//! `AuthDenied`, `Pong`, `Executed`, `Failed`).
 //!
-//! # Peer authentication
+//! # Authorizing a connection
 //!
-//! The socket's `0600` permissions only prove a connecting peer shares the
-//! agent's UID — they do **not** stop a *different* same-UID process from
-//! connecting to the signing oracle and trading as you. To close that gap, the
-//! agent is started with a one-time [`AuthToken`] (generated and printed to the
-//! operator's terminal). A freshly accepted connection is **unauthenticated**:
-//! the only request it can issue is [`AgentRequest::Authenticate`], and every
-//! other request is refused until it presents the token. The token is compared
-//! in constant time and **consumed on first valid use**, so exactly one
-//! connection can ever authenticate — the single "trade as me" oracle. An
-//! unauthenticated peer learns nothing about the agent (not even its base URL or
-//! trading policy): the [`Capabilities`] are revealed only inside the
-//! [`AgentResponse::Authenticated`] reply.
+//! A freshly accepted connection is **unauthorized**: it may only ask to authorize,
+//! and every other request is refused until it does. There are two ways:
+//!
+//! - **Token** — the client presents the one-time [`AuthToken`] the operator was
+//!   given at startup (`--auth-token`). It is compared in constant time and consumed
+//!   on first use, and grants the agent's ceiling [`AccessLevel`]. One token, one
+//!   client (e.g. the MCP).
+//! - **Manual** — the client sends [`AgentRequest::RequestAuth`] and becomes
+//!   *pending*; the operator sees its peer credentials (uid/gid/pid) and label and
+//!   grants it (at an [`AccessLevel`] of their choice, up to the ceiling) or denies
+//!   it. Any number of clients can be authorized this way; the client polls until the
+//!   operator decides.
+//!
+//! Access is enforced **per connection** by [`required_access_for`] on every
+//! forwarded request — the agent, not the client, is the trust boundary.
 //!
 //! # Transport security
 //!
-//! The socket is created with `0600` permissions inside `$XDG_RUNTIME_DIR`
-//! (itself `0700`, user-private). There is no network transport: a signing agent
-//! reachable over TCP would be a "trade as me" oracle, so that is deliberately
-//! out of scope.
+//! The socket is created world-connectable (`0666`) so a peer with a different UID
+//! (e.g. a container) can reach it; nothing is served without a valid token or an
+//! explicit operator grant, and the operator sees each peer's uid/gid/pid before
+//! deciding. Placing the socket in a private directory (e.g. `$XDG_RUNTIME_DIR`,
+//! `0700`) additionally restricts it to the agent's own UID. There is no network
+//! transport: a signing agent reachable over TCP would be a "trade as me" oracle.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -91,11 +94,15 @@ const TOKEN_BYTES: usize = 32;
 
 /// Refusal sent when a connection presents a wrong or already-spent token.
 const MSG_AUTH_FAILED: &str = "authentication failed: wrong or already-used token";
-/// Refusal sent when an unauthenticated connection issues a non-`Authenticate`
-/// request.
-const MSG_AUTH_REQUIRED: &str = "authenticate first: present the agent's one-time token";
-/// Refusal sent when an already-authenticated connection re-authenticates.
-const MSG_ALREADY_AUTHENTICATED: &str = "already authenticated";
+/// Refusal sent when an unauthorized connection issues a request before it has
+/// authorized (by token or operator grant).
+const MSG_AUTH_REQUIRED: &str =
+    "authorize first: present the agent's token or request operator approval";
+/// Refusal sent for a token handshake when the agent was started without a token.
+const MSG_NO_TOKEN: &str =
+    "this agent has no token; request operator approval (RequestAuth) instead";
+/// Told to a connection the operator has denied.
+const MSG_DENIED: &str = "the operator denied this connection";
 
 /// A one-time, high-entropy token that authenticates the connecting peer before
 /// the signing oracle is exposed.
@@ -104,9 +111,8 @@ const MSG_ALREADY_AUTHENTICATED: &str = "already authenticated";
 /// terminal, and the authenticating client presents it in the
 /// [`AgentRequest::Authenticate`] handshake. It is never accepted as a
 /// command-line argument value (that would expose it via `/proc/<pid>/cmdline`
-/// and `ps` to the very same-UID attacker this defends against): the operator
-/// copies the printed value out of band. The token is compared in constant time
-/// and consumed on first valid use.
+/// and `ps` to a same-UID attacker): the operator copies the printed value out of
+/// band. The token is compared in constant time and consumed on first valid use.
 pub struct AuthToken(Zeroizing<String>);
 
 impl AuthToken {
@@ -148,14 +154,22 @@ impl std::fmt::Debug for AuthToken {
 /// A request sent from a client to the agent.
 #[derive(Encode, Decode)]
 pub enum AgentRequest {
-    /// Present the one-time handshake token. The only request an unauthenticated
-    /// connection may issue; on success the agent replies with
-    /// [`AgentResponse::Authenticated`].
+    /// Present the one-time handshake token (grants the agent's ceiling access).
     Authenticate(String),
-    /// Liveness check (only after authentication).
+    /// Ask the operator to authorize this connection at `requested` access (capped
+    /// at the ceiling), tagged with an optional `label`. Idempotent — resend it to
+    /// poll: the reply is [`AgentResponse::AuthPending`] until the operator decides,
+    /// then [`AgentResponse::Authenticated`] or [`AgentResponse::AuthDenied`].
+    RequestAuth {
+        /// A human-readable tag the operator sees (e.g. `revolutx-collector`).
+        label: Option<String>,
+        /// The access tier the client is asking for (capped at the ceiling).
+        requested: AccessLevel,
+    },
+    /// Liveness check (only after authorization).
     Ping,
     /// Execute a forwarded request — the agent signs and sends it (only after
-    /// authentication).
+    /// authorization).
     Execute(WireRequest),
 }
 
@@ -164,6 +178,11 @@ impl std::fmt::Debug for AgentRequest {
         // Redact the candidate token so it cannot leak through a Debug render.
         match self {
             Self::Authenticate(_) => f.write_str("Authenticate(<redacted>)"),
+            Self::RequestAuth { label, requested } => f
+                .debug_struct("RequestAuth")
+                .field("label", label)
+                .field("requested", requested)
+                .finish(),
             Self::Ping => f.write_str("Ping"),
             Self::Execute(wire) => f.debug_tuple("Execute").field(wire).finish(),
         }
@@ -173,31 +192,32 @@ impl std::fmt::Debug for AgentRequest {
 /// A response sent from the agent back to a client.
 #[derive(Debug, Encode, Decode)]
 pub enum AgentResponse {
-    /// Authentication succeeded — carries the [`Capabilities`] (revealed only
-    /// now, never to an unauthenticated peer).
+    /// Authorization succeeded — carries the [`Capabilities`] (base URL + the access
+    /// granted to *this* connection), revealed only now.
     Authenticated(Capabilities),
+    /// A manual authorization request is registered and awaiting the operator; the
+    /// client should poll (resend [`AgentRequest::RequestAuth`]) shortly.
+    AuthPending,
+    /// The operator denied this connection. Human-readable.
+    AuthDenied(String),
     /// Reply to [`AgentRequest::Ping`].
     Pong,
     /// A completed request's raw response.
     Executed(WireResponse),
-    /// The agent could not execute the request, or refused it (e.g. the
-    /// connection has not authenticated, or the token was wrong/already used).
-    /// The message is human-readable and intentionally coarse — it must not leak
-    /// credential material.
+    /// The agent could not execute the request, or refused it (not yet authorized,
+    /// or a wrong/spent token). Coarse by design — it must not leak credentials.
     Failed(String),
 }
 
-/// What an agent is configured to allow. Reported during the connection
-/// handshake so a client (e.g. the MCP) reflects the agent's policy without
-/// owning any of it.
+/// What a connection is allowed. Reported in the authorization reply so a client
+/// (e.g. the MCP) reflects the policy without owning any of it.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Capabilities {
     /// The base URL the agent targets (it owns the real environment; clients use
     /// this only for display).
     pub base_url: String,
-    /// The [`AccessLevel`] the agent will serve: which operations it permits
-    /// (market data, account reads, or trading). The agent enforces this
-    /// regardless of what any client believes; it is reported only so a client can
+    /// The [`AccessLevel`] granted to this connection. The agent enforces it
+    /// regardless of what the client believes; it is reported only so a client can
     /// reflect the policy.
     pub access: AccessLevel,
 }
@@ -224,8 +244,7 @@ pub struct WireResponse {
 /// The default socket path: `$XDG_RUNTIME_DIR/revolutx-agent.sock`.
 ///
 /// When `XDG_RUNTIME_DIR` is unset, falls back to a `revolutx-agent`
-/// subdirectory of the system temp dir — the daemon creates that subdirectory
-/// `0700`, so the socket is private even when the temp dir itself is shared.
+/// subdirectory of the system temp dir.
 #[must_use]
 pub fn default_socket_path() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
@@ -279,27 +298,39 @@ fn decode<T: Decode<()>>(bytes: &[u8]) -> std::io::Result<T> {
 
 // --- client side -----------------------------------------------------------
 
+/// The result of an [`AgentExecutor::request_authorization`] poll.
+#[derive(Debug)]
+pub enum AuthOutcome {
+    /// The operator granted this connection; carries the granted capabilities.
+    Authorized(Capabilities),
+    /// Still awaiting the operator's decision — poll again shortly.
+    Pending,
+    /// The operator denied this connection; carries a human-readable reason.
+    Denied(String),
+}
+
 /// A [`RequestExecutor`] that forwards every request to a running agent.
 ///
 /// It holds a **single persistent connection** for its lifetime and serializes
 /// requests over it, so concurrent [`execute`](RequestExecutor::execute) calls
-/// are safe but run one at a time. The connection starts **unauthenticated**:
-/// call [`authenticate`](Self::authenticate) with the agent's one-time token
-/// before issuing any other request, or the agent refuses them.
+/// are safe but run one at a time. The connection starts **unauthorized**: call
+/// [`authenticate`](Self::authenticate) (token) or
+/// [`request_authorization`](Self::request_authorization) (manual) before issuing
+/// any other request, or the agent refuses them.
 #[derive(Debug)]
 pub struct AgentExecutor {
     conn: tokio::sync::Mutex<UnixStream>,
-    /// The agent's base URL and trading policy — learned only on successful
-    /// authentication, so unset until then.
+    /// The agent's base URL and this connection's access — learned only on
+    /// successful authorization, so unset until then.
     caps: OnceLock<Capabilities>,
     authenticated: AtomicBool,
 }
 
 impl AgentExecutor {
     /// Opens the connection to the agent at `socket_path`. No request is sent
-    /// yet: the connection is unauthenticated until
-    /// [`authenticate`](Self::authenticate) succeeds, and the agent reveals
-    /// nothing (not even its base URL) before then.
+    /// yet: the connection is unauthorized until [`authenticate`](Self::authenticate)
+    /// or [`request_authorization`](Self::request_authorization) succeeds, and the
+    /// agent reveals nothing (not even its base URL) before then.
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self> {
         let socket_path = socket_path.as_ref();
         let stream = UnixStream::connect(socket_path).await.map_err(|e| {
@@ -315,12 +346,11 @@ impl AgentExecutor {
         })
     }
 
-    /// Presents the agent's one-time token. On success the agent reveals its
-    /// [`Capabilities`] (base URL + access policy), which are cached for
-    /// [`base_url`](RequestExecutor::base_url) and [`access`](Self::access), and the
-    /// connection becomes authenticated. The token is single-use: a second
-    /// connection presenting it is refused. A wrong token returns an error but
-    /// leaves the connection open to retry.
+    /// Presents the agent's one-time token. On success the agent reveals this
+    /// connection's [`Capabilities`] (base URL + access), which are cached for
+    /// [`base_url`](RequestExecutor::base_url) and [`access`](Self::access). The
+    /// token is single-use: a second connection presenting it is refused. A wrong
+    /// token returns an error but leaves the connection open to retry.
     pub async fn authenticate(&self, token: &str) -> Result<()> {
         match self
             .round_trip(&AgentRequest::Authenticate(token.to_owned()))
@@ -332,23 +362,54 @@ impl AgentExecutor {
                 self.authenticated.store(true, Ordering::Release);
                 Ok(())
             }
-            AgentResponse::Failed(message) => Err(Error::agent(message)),
-            AgentResponse::Pong | AgentResponse::Executed(_) => Err(Error::agent(
-                "agent did not answer the authentication handshake",
-            )),
+            AgentResponse::Failed(message) | AgentResponse::AuthDenied(message) => {
+                Err(Error::agent(message))
+            }
+            AgentResponse::AuthPending | AgentResponse::Pong | AgentResponse::Executed(_) => Err(
+                Error::agent("agent did not answer the authentication handshake"),
+            ),
         }
     }
 
-    /// Whether this connection has authenticated.
+    /// Requests interactive operator authorization for this connection at
+    /// `requested` access, tagged with `label` for the operator's display. This is
+    /// the alternative to [`authenticate`](Self::authenticate) for clients with no
+    /// token. Idempotent: call it repeatedly (e.g. once a second) to poll until the
+    /// operator decides. On [`AuthOutcome::Authorized`] the granted [`Capabilities`]
+    /// are cached for [`access`](Self::access) and [`base_url`](RequestExecutor::base_url).
+    pub async fn request_authorization(
+        &self,
+        label: Option<&str>,
+        requested: AccessLevel,
+    ) -> Result<AuthOutcome> {
+        let request = AgentRequest::RequestAuth {
+            label: label.map(str::to_owned),
+            requested,
+        };
+        match self.round_trip(&request).await? {
+            AgentResponse::Authenticated(caps) => {
+                let _ = self.caps.set(caps.clone());
+                self.authenticated.store(true, Ordering::Release);
+                Ok(AuthOutcome::Authorized(caps))
+            }
+            AgentResponse::AuthPending => Ok(AuthOutcome::Pending),
+            AgentResponse::AuthDenied(message) => Ok(AuthOutcome::Denied(message)),
+            AgentResponse::Failed(message) => Err(Error::agent(message)),
+            AgentResponse::Pong | AgentResponse::Executed(_) => {
+                Err(Error::agent("unexpected agent response to a RequestAuth"))
+            }
+        }
+    }
+
+    /// Whether this connection has authorized.
     #[must_use]
     pub fn is_session_authenticated(&self) -> bool {
         self.authenticated.load(Ordering::Acquire)
     }
 
-    /// The [`AccessLevel`] the agent will serve, reported on authentication.
+    /// The [`AccessLevel`] granted to this connection, reported on authorization.
     /// Defaults to the most restrictive ([`Market`](AccessLevel::Market)) until
-    /// then, so an unauthenticated connection never appears more privileged than it
-    /// is.
+    /// then, so an unauthorized connection never appears more privileged than it is.
     #[must_use]
     pub fn access(&self) -> AccessLevel {
         self.caps
@@ -357,7 +418,7 @@ impl AgentExecutor {
     }
 
     /// Checks that the agent is responding (sent over the established
-    /// connection). Only meaningful after authentication.
+    /// connection). Only meaningful after authorization.
     pub async fn ping(&self) -> Result<()> {
         match self.round_trip(&AgentRequest::Ping).await? {
             AgentResponse::Pong => Ok(()),
@@ -400,7 +461,10 @@ impl RequestExecutor for AgentExecutor {
                     body: w.body,
                 }),
                 AgentResponse::Failed(message) => Err(Error::agent(message)),
-                AgentResponse::Pong | AgentResponse::Authenticated(_) => {
+                AgentResponse::Pong
+                | AgentResponse::Authenticated(_)
+                | AgentResponse::AuthPending
+                | AgentResponse::AuthDenied(_) => {
                     Err(Error::agent("unexpected agent response to an Execute"))
                 }
             }
@@ -408,145 +472,326 @@ impl RequestExecutor for AgentExecutor {
     }
 
     fn base_url(&self) -> &str {
-        // Known only after authentication; empty until then (the agent path uses
+        // Known only after authorization; empty until then (the agent path uses
         // this for display only — the agent itself joins paths to the real URL).
         self.caps.get().map_or("", |caps| caps.base_url.as_str())
     }
 
     fn is_authenticated(&self) -> bool {
-        // The agent holds the credentials, so once this connection has
-        // authenticated it can sign on our behalf.
+        // The agent holds the credentials, so once this connection has authorized
+        // it can sign on our behalf.
         self.is_session_authenticated()
     }
 }
 
 // --- server side -----------------------------------------------------------
 
-/// Serves the agent protocol on a unix socket at `socket_path` until the
-/// authenticated client disconnects, then returns.
+/// Identifier assigned to each accepted connection, shown in the operator UI and
+/// used to grant/deny it.
+pub type ConnId = u64;
+
+/// Operating-system credentials of a connecting peer.
 ///
-/// Connections are accepted **concurrently** and each starts unauthenticated: it
-/// may only issue [`AgentRequest::Authenticate`], and every other request is
-/// refused. The first connection to present the matching `token` consumes it
-/// (atomically, constant-time compared) and becomes the single authenticated
-/// client — the "trade as me" oracle. `on_connect` fires once, at that moment
-/// (**not** on TCP accept), so the daemon's pre-connection idle auto-lock is
-/// cancelled only by a genuinely authenticated peer, never by an attacker merely
-/// connecting. When that client disconnects, this returns and the daemon exits,
-/// re-locking the vault; the token is already spent, so no later connection can
-/// authenticate.
-///
-/// `access` is the authoritative capability policy: the agent serves only the
-/// operations that tier permits (see [`required_access_for`]) and refuses the
-/// rest regardless of what the client believes — market data at
-/// [`Market`](AccessLevel::Market), account reads additionally at
-/// [`View`](AccessLevel::View), and order mutations only at
-/// [`Trading`](AccessLevel::Trading). It is reported to the client inside the
-/// authentication reply.
-///
-/// The socket is created with `0600` permissions. If a live agent is already
-/// listening on `socket_path` this returns an error; a stale socket file (no
-/// listener) is removed and replaced.
-pub async fn serve(
-    executor: Arc<dyn RequestExecutor>,
-    socket_path: &Path,
-    access: AccessLevel,
-    token: AuthToken,
-    on_connect: impl FnOnce() + Send,
-) -> Result<()> {
-    let listener = bind(socket_path).await?;
-
-    let gate = Arc::new(tokio::sync::Mutex::new(Gate {
-        token,
-        consumed: false,
-    }));
-    // Fired once, by the connection that authenticates.
-    let authenticated = Arc::new(Notify::new());
-    // Fired when the authenticated client's session ends (it disconnected).
-    let session_ended = Arc::new(Notify::new());
-
-    let accept = tokio::spawn(accept_loop(
-        listener,
-        gate,
-        executor,
-        access,
-        Arc::clone(&authenticated),
-        Arc::clone(&session_ended),
-    ));
-
-    // Block until someone authenticates, then cancel the idle auto-lock; then
-    // block until that client disconnects. Unauthenticated peers coming and going
-    // never end the daemon — the watchdog's idle timeout covers "nobody ever
-    // authenticated".
-    authenticated.notified().await;
-    on_connect();
-    session_ended.notified().await;
-
-    accept.abort();
-    Ok(())
+/// Read from the socket and shown to the operator, so they can evaluate a connection
+/// before granting it now that the socket is not restricted to the agent's own UID.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerCred {
+    /// Peer user id (`u32::MAX` if it could not be read).
+    pub uid: u32,
+    /// Peer group id (`u32::MAX` if it could not be read).
+    pub gid: u32,
+    /// Peer process id, when the platform reports it.
+    pub pid: Option<i32>,
 }
 
-/// The one-time authentication gate shared by every connection: the token is
-/// consumed by the first connection to prove it.
+/// How a connection authorized (or is trying to).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethod {
+    /// Presented the one-time token.
+    Token,
+    /// Interactive operator approval.
+    Manual,
+}
+
+impl AuthMethod {
+    /// The lowercase name of this method (`token` or `manual`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Token => "token",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// The lifecycle state of a connection in the agent's registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnState {
+    /// Accepted, but has not asked to authorize yet.
+    Connected,
+    /// Asked for manual authorization at `requested`; awaiting the operator.
+    Pending {
+        /// The access the client asked for (already capped at the ceiling).
+        requested: AccessLevel,
+    },
+    /// Authorized to serve requests up to `access`.
+    Authorized {
+        /// The granted tier, enforced on every forwarded request.
+        access: AccessLevel,
+    },
+    /// Denied by the operator; refused everything.
+    Denied,
+}
+
+/// A snapshot of one connection for the operator UI (see [`AgentControl::list`]).
+#[derive(Debug, Clone)]
+pub struct ConnectionInfo {
+    /// The connection's id.
+    pub id: ConnId,
+    /// The peer's OS credentials.
+    pub peer: PeerCred,
+    /// The client-supplied label, if any (e.g. `revolutx-collector`).
+    pub label: Option<String>,
+    /// How it authorized, once it has attempted to.
+    pub method: Option<AuthMethod>,
+    /// Its current state.
+    pub state: ConnState,
+    /// When it connected.
+    pub since: Instant,
+}
+
+/// The one-time token gate: consumed by the first connection to present it.
 struct Gate {
     token: AuthToken,
     consumed: bool,
 }
 
-/// Atomically checks a candidate against the unspent token. Returns `true` and
-/// marks the token spent on the first valid presentation; `false` afterwards, or
-/// for a wrong candidate (which does **not** spend it).
-async fn try_consume(gate: &tokio::sync::Mutex<Gate>, candidate: &str) -> bool {
-    let mut gate = gate.lock().await;
-    if gate.consumed {
-        return false;
+/// One tracked connection.
+struct Entry {
+    peer: PeerCred,
+    label: Option<String>,
+    method: Option<AuthMethod>,
+    state: ConnState,
+    since: Instant,
+}
+
+/// Shared, mutable state: every live connection plus the auth policy. Guarded by a
+/// std mutex; critical sections are short and never span an `.await`.
+struct Registry {
+    conns: BTreeMap<ConnId, Entry>,
+    next_id: ConnId,
+    /// The maximum grantable [`AccessLevel`] (and the level a token grants).
+    ceiling: AccessLevel,
+    /// The optional one-time token; `None` when the agent is manual-only.
+    token: Option<Gate>,
+}
+
+/// Locks a mutex, recovering the guard if a previous holder panicked. Poisoning is
+/// not fatal here — the invariants are re-established on each short critical section.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The operator's handle to a running [`AgentServer`]: inspect connections and
+/// grant/deny/quit. The `revolutx agent start` REPL drives these; it owns none of
+/// the credentials.
+#[derive(Clone)]
+pub struct AgentControl {
+    registry: Arc<Mutex<Registry>>,
+    shutdown: Arc<Notify>,
+}
+
+impl AgentControl {
+    /// A snapshot of every live connection, ordered by id.
+    #[must_use]
+    pub fn list(&self) -> Vec<ConnectionInfo> {
+        let reg = lock(&self.registry);
+        reg.conns
+            .iter()
+            .map(|(&id, e)| ConnectionInfo {
+                id,
+                peer: e.peer,
+                label: e.label.clone(),
+                method: e.method,
+                state: e.state,
+                since: e.since,
+            })
+            .collect()
     }
-    if gate.token.verify(candidate) {
-        gate.consumed = true;
-        true
-    } else {
-        false
+
+    /// Authorizes connection `id`. `access` defaults to what the connection
+    /// requested; it must not exceed the agent's ceiling. Returns the granted level.
+    pub fn grant(&self, id: ConnId, access: Option<AccessLevel>) -> Result<AccessLevel> {
+        let mut reg = lock(&self.registry);
+        let ceiling = reg.ceiling;
+        let entry = reg
+            .conns
+            .get_mut(&id)
+            .ok_or_else(|| Error::agent(format!("no connection #{id}")))?;
+        let requested = match entry.state {
+            ConnState::Pending { requested } => Some(requested),
+            _ => None,
+        };
+        let level = access.or(requested).ok_or_else(|| {
+            Error::agent(format!(
+                "connection #{id} has not requested an access level; specify one, e.g. `grant {id} market`"
+            ))
+        })?;
+        if level > ceiling {
+            return Err(Error::agent(format!(
+                "cannot grant `{}`: the agent's ceiling is `{}`",
+                level.as_str(),
+                ceiling.as_str()
+            )));
+        }
+        entry.state = ConnState::Authorized { access: level };
+        entry.method = Some(AuthMethod::Manual);
+        drop(reg);
+        Ok(level)
+    }
+
+    /// Denies connection `id`; it is refused everything until it disconnects.
+    pub fn deny(&self, id: ConnId) -> Result<()> {
+        let mut reg = lock(&self.registry);
+        let entry = reg
+            .conns
+            .get_mut(&id)
+            .ok_or_else(|| Error::agent(format!("no connection #{id}")))?;
+        entry.state = ConnState::Denied;
+        drop(reg);
+        Ok(())
+    }
+
+    /// How many connections are currently authorized — the signal the daemon's idle
+    /// auto-lock watches (it locks when this stays zero).
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        let reg = lock(&self.registry);
+        reg.conns
+            .values()
+            .filter(|e| matches!(e.state, ConnState::Authorized { .. }))
+            .count()
+    }
+
+    /// Signals [`AgentServer::run`] to stop accepting and return.
+    pub fn shutdown(&self) {
+        self.shutdown.notify_one();
     }
 }
 
-/// Accepts connections forever, serving each in its own task. The [`JoinSet`] is
-/// dropped — aborting any still-open connections — when this future is dropped,
-/// which `serve` does once the authenticated session ends.
-async fn accept_loop(
-    listener: UnixListener,
-    gate: Arc<tokio::sync::Mutex<Gate>>,
+/// A persistent, multi-client signing agent. Build it with [`new`](Self::new),
+/// then [`run`](Self::run) the accept loop; drive authorization out of band through
+/// the returned [`AgentControl`].
+pub struct AgentServer {
     executor: Arc<dyn RequestExecutor>,
-    access: AccessLevel,
-    authenticated: Arc<Notify>,
-    session_ended: Arc<Notify>,
-) {
-    let mut sessions = JoinSet::new();
-    loop {
-        // Reap finished connections so the set does not grow with churn.
-        while sessions.try_join_next().is_some() {}
-        let Ok((stream, _addr)) = listener.accept().await else {
-            return;
+    registry: Arc<Mutex<Registry>>,
+    shutdown: Arc<Notify>,
+}
+
+impl AgentServer {
+    /// Builds an agent over `executor` with ceiling `access` and an optional
+    /// one-time `token`. Returns the server and the operator [`AgentControl`].
+    #[must_use]
+    pub fn new(
+        executor: Arc<dyn RequestExecutor>,
+        access: AccessLevel,
+        token: Option<AuthToken>,
+    ) -> (Self, AgentControl) {
+        let registry = Arc::new(Mutex::new(Registry {
+            conns: BTreeMap::new(),
+            next_id: 1,
+            ceiling: access,
+            token: token.map(|token| Gate {
+                token,
+                consumed: false,
+            }),
+        }));
+        let shutdown = Arc::new(Notify::new());
+        let control = AgentControl {
+            registry: Arc::clone(&registry),
+            shutdown: Arc::clone(&shutdown),
         };
-        let gate = Arc::clone(&gate);
-        let executor = Arc::clone(&executor);
-        let authenticated = Arc::clone(&authenticated);
-        let session_ended = Arc::clone(&session_ended);
-        sessions.spawn(async move {
-            handle_connection(
-                stream,
-                &gate,
-                executor.as_ref(),
-                access,
-                &authenticated,
-                &session_ended,
-            )
-            .await;
-        });
+        (
+            Self {
+                executor,
+                registry,
+                shutdown,
+            },
+            control,
+        )
     }
+
+    /// Accepts connections on `socket_path` and serves each until
+    /// [`AgentControl::shutdown`] is called (or the future is dropped). Each
+    /// connection is registered with its peer credentials and served in its own
+    /// task; it is removed when it disconnects.
+    ///
+    /// The socket is created world-connectable (`0666`); if a live agent is already
+    /// listening this errors, and a stale socket file is replaced.
+    pub async fn run(self, socket_path: &Path) -> Result<()> {
+        let listener = bind(socket_path).await?;
+        let mut sessions = JoinSet::new();
+        loop {
+            tokio::select! {
+                () = self.shutdown.notified() => break,
+                accepted = listener.accept() => {
+                    // Reap finished connections so the set does not grow with churn.
+                    while sessions.try_join_next().is_some() {}
+                    let Ok((stream, _addr)) = accepted else { continue };
+                    let peer = read_peer_cred(&stream);
+                    let id = register(&self.registry, peer);
+                    let registry = Arc::clone(&self.registry);
+                    let executor = Arc::clone(&self.executor);
+                    sessions.spawn(async move {
+                        handle_connection(stream, id, &registry, executor.as_ref()).await;
+                        lock(&registry).conns.remove(&id);
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reads the peer's credentials, falling back to a sentinel if unavailable.
+fn read_peer_cred(stream: &UnixStream) -> PeerCred {
+    stream.peer_cred().map_or(
+        PeerCred {
+            uid: u32::MAX,
+            gid: u32::MAX,
+            pid: None,
+        },
+        |c| PeerCred {
+            uid: c.uid(),
+            gid: c.gid(),
+            pid: c.pid(),
+        },
+    )
+}
+
+/// Registers a freshly accepted connection as [`ConnState::Connected`] and returns
+/// its new id.
+fn register(registry: &Mutex<Registry>, peer: PeerCred) -> ConnId {
+    let mut reg = lock(registry);
+    let id = reg.next_id;
+    reg.next_id += 1;
+    reg.conns.insert(
+        id,
+        Entry {
+            peer,
+            label: None,
+            method: None,
+            state: ConnState::Connected,
+            since: Instant::now(),
+        },
+    );
+    id
 }
 
 /// Binds the socket, refusing to clobber a live agent and cleaning up a stale
-/// socket file, then tightens permissions to `0600`.
+/// socket file, then makes it connectable by any peer (`0666`) — the token /
+/// operator-approval gate, not the file mode, is the trust boundary. Placing the
+/// socket in a private directory further limits who can reach it.
 async fn bind(socket_path: &Path) -> Result<UnixListener> {
     if socket_path.exists() {
         // If something is actually listening, another agent owns this socket.
@@ -560,13 +805,7 @@ async fn bind(socket_path: &Path) -> Result<UnixListener> {
         std::fs::remove_file(socket_path)
             .map_err(|e| Error::agent(format!("could not remove stale socket: {e}")))?;
     }
-
-    // Keep the socket's parent directory private (0700). This protects the brief
-    // window between `bind` (which creates the socket honoring the ambient umask,
-    // possibly group/other-readable) and the chmod below: a 0700 parent means no
-    // other user can reach the socket during that window. `$XDG_RUNTIME_DIR` is
-    // already 0700; this also covers the temp-dir fallback's private subdir.
-    ensure_private_parent(socket_path)?;
+    ensure_parent_dir(socket_path)?;
     let listener = UnixListener::bind(socket_path)
         .map_err(|e| Error::agent(format!("could not bind {}: {e}", socket_path.display())))?;
     set_socket_permissions(socket_path)?;
@@ -574,37 +813,26 @@ async fn bind(socket_path: &Path) -> Result<UnixListener> {
 }
 
 #[cfg(unix)]
-fn ensure_private_parent(socket_path: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+fn ensure_parent_dir(socket_path: &Path) -> Result<()> {
     let Some(parent) = socket_path.parent() else {
         return Ok(());
     };
-    if parent.as_os_str().is_empty() {
+    if parent.as_os_str().is_empty() || parent.exists() {
         return Ok(());
     }
-    if !parent.exists() {
-        // We are creating it, so make it private from the start (mode honors the
-        // umask, hence the explicit set_permissions belt below).
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)
-            .map_err(|e| Error::agent(format!("could not create {}: {e}", parent.display())))?;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| Error::agent(format!("could not secure {}: {e}", parent.display())))?;
-    }
-    Ok(())
+    std::fs::create_dir_all(parent)
+        .map_err(|e| Error::agent(format!("could not create {}: {e}", parent.display())))
 }
 
 #[cfg(not(unix))]
-fn ensure_private_parent(_socket_path: &Path) -> Result<()> {
+fn ensure_parent_dir(_socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
 fn set_socket_permissions(socket_path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))
         .map_err(|e| Error::agent(format!("could not set socket permissions: {e}")))
 }
 
@@ -613,21 +841,17 @@ fn set_socket_permissions(_socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Serves one connection. It is unauthenticated until it presents the token;
-/// before then only [`AgentRequest::Authenticate`] is honored (every other
-/// request is refused without revealing anything about the agent). After
-/// authentication it serves `Ping`/`Execute` until the client disconnects, then
-/// signals `session_ended` so the daemon can re-lock and exit.
+/// Serves one connection: it is unauthorized until it presents a valid token or the
+/// operator grants it, and only auth requests are honored before then. After
+/// authorization it serves `Ping`/`Execute` (gated per connection) until it
+/// disconnects.
 async fn handle_connection(
     mut stream: UnixStream,
-    gate: &tokio::sync::Mutex<Gate>,
+    id: ConnId,
+    registry: &Mutex<Registry>,
     executor: &dyn RequestExecutor,
-    access: AccessLevel,
-    authenticated: &Notify,
-    session_ended: &Notify,
 ) {
-    let mut is_authenticated = false;
-    let mut attempts: u32 = 0;
+    let mut token_attempts: u32 = 0;
     loop {
         // A closed connection or a malformed frame just ends this session.
         let Ok(bytes) = read_frame_bytes(&mut stream, MAX_REQUEST_FRAME).await else {
@@ -638,65 +862,133 @@ async fn handle_connection(
             Err(_) => break,
         };
 
-        if !is_authenticated {
-            match request {
-                AgentRequest::Authenticate(candidate) => {
-                    // Wipe the candidate after comparison — it is the token.
-                    let candidate = Zeroizing::new(candidate);
-                    if try_consume(gate, candidate.as_str()).await {
-                        is_authenticated = true;
-                        authenticated.notify_one();
-                        let caps = Capabilities {
-                            base_url: executor.base_url().to_owned(),
-                            access,
-                        };
-                        if write_frame(&mut stream, &AgentResponse::Authenticated(caps))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    } else {
-                        attempts += 1;
-                        let refused = AgentResponse::Failed(MSG_AUTH_FAILED.to_owned());
-                        // Keep the connection open to retry, up to the attempt cap.
-                        if write_frame(&mut stream, &refused).await.is_err()
-                            || attempts >= MAX_AUTH_ATTEMPTS
-                        {
-                            break;
-                        }
-                    }
-                }
-                AgentRequest::Ping | AgentRequest::Execute(_) => {
-                    // Refuse, but keep the connection open so a client that issued
-                    // a request early can still authenticate and retry on it.
-                    let refused = AgentResponse::Failed(MSG_AUTH_REQUIRED.to_owned());
-                    if write_frame(&mut stream, &refused).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-
         let response = match request {
-            AgentRequest::Ping => AgentResponse::Pong,
-            AgentRequest::Execute(wire) => execute_forwarded(executor, wire, access).await,
-            // Re-authenticating an already-authenticated connection is a no-op.
-            AgentRequest::Authenticate(_) => {
-                AgentResponse::Failed(MSG_ALREADY_AUTHENTICATED.to_owned())
+            AgentRequest::Authenticate(candidate) => {
+                // Wipe the candidate after comparison — it is the token.
+                let candidate = Zeroizing::new(candidate);
+                match authorize_token(registry, id, executor, candidate.as_str()) {
+                    TokenOutcome::Granted(caps) => AgentResponse::Authenticated(caps),
+                    TokenOutcome::NoToken => AgentResponse::Failed(MSG_NO_TOKEN.to_owned()),
+                    TokenOutcome::Bad => {
+                        token_attempts += 1;
+                        // Keep the connection open to retry, up to the attempt cap.
+                        if token_attempts >= MAX_AUTH_ATTEMPTS {
+                            let _ = write_frame(
+                                &mut stream,
+                                &AgentResponse::Failed(MSG_AUTH_FAILED.to_owned()),
+                            )
+                            .await;
+                            break;
+                        }
+                        AgentResponse::Failed(MSG_AUTH_FAILED.to_owned())
+                    }
+                }
             }
+            AgentRequest::RequestAuth { label, requested } => {
+                request_manual(registry, id, executor, label, requested)
+            }
+            AgentRequest::Ping => match authorized_access(registry, id) {
+                Some(_) => AgentResponse::Pong,
+                None => AgentResponse::Failed(MSG_AUTH_REQUIRED.to_owned()),
+            },
+            AgentRequest::Execute(wire) => match authorized_access(registry, id) {
+                Some(access) => execute_forwarded(executor, wire, access).await,
+                None => AgentResponse::Failed(MSG_AUTH_REQUIRED.to_owned()),
+            },
         };
 
         if write_frame(&mut stream, &response).await.is_err() {
             break;
         }
     }
+}
 
-    if is_authenticated {
-        // The one authenticated client has gone: end the daemon (re-lock vault).
-        session_ended.notify_one();
+/// The current authorized access of connection `id`, or `None` if it is not
+/// authorized. Re-read on each request so an operator grant/deny takes effect at once.
+fn authorized_access(registry: &Mutex<Registry>, id: ConnId) -> Option<AccessLevel> {
+    let reg = lock(registry);
+    match reg.conns.get(&id)?.state {
+        ConnState::Authorized { access } => Some(access),
+        _ => None,
     }
+}
+
+/// Outcome of a token handshake.
+enum TokenOutcome {
+    Granted(Capabilities),
+    NoToken,
+    Bad,
+}
+
+/// Verifies and consumes the one-time token for connection `id`, authorizing it at
+/// the agent's ceiling on success.
+fn authorize_token(
+    registry: &Mutex<Registry>,
+    id: ConnId,
+    executor: &dyn RequestExecutor,
+    candidate: &str,
+) -> TokenOutcome {
+    let ceiling;
+    {
+        let mut reg = lock(registry);
+        ceiling = reg.ceiling;
+        match reg.token.as_mut() {
+            None => return TokenOutcome::NoToken,
+            Some(gate) => {
+                if gate.consumed || !gate.token.verify(candidate) {
+                    return TokenOutcome::Bad;
+                }
+                gate.consumed = true;
+            }
+        }
+        if let Some(entry) = reg.conns.get_mut(&id) {
+            entry.state = ConnState::Authorized { access: ceiling };
+            entry.method = Some(AuthMethod::Token);
+        }
+    }
+    // Build the reply outside the lock (don't call the executor while holding it).
+    TokenOutcome::Granted(Capabilities {
+        base_url: executor.base_url().to_owned(),
+        access: ceiling,
+    })
+}
+
+/// Registers/refreshes a manual authorization request for connection `id` and
+/// reports its current status (so a polling client sees a grant/denial take effect).
+fn request_manual(
+    registry: &Mutex<Registry>,
+    id: ConnId,
+    executor: &dyn RequestExecutor,
+    label: Option<String>,
+    requested: AccessLevel,
+) -> AgentResponse {
+    // Read the executor's base URL before locking, so we never call it under the lock.
+    let base_url = executor.base_url().to_owned();
+    let mut reg = lock(registry);
+    let ceiling = reg.ceiling;
+    let response = {
+        let Some(entry) = reg.conns.get_mut(&id) else {
+            return AgentResponse::Failed(MSG_AUTH_REQUIRED.to_owned());
+        };
+        match entry.state {
+            ConnState::Authorized { access } => {
+                AgentResponse::Authenticated(Capabilities { base_url, access })
+            }
+            ConnState::Denied => AgentResponse::AuthDenied(MSG_DENIED.to_owned()),
+            ConnState::Connected | ConnState::Pending { .. } => {
+                entry.state = ConnState::Pending {
+                    requested: requested.min(ceiling),
+                };
+                if label.is_some() {
+                    entry.label = label;
+                }
+                entry.method = Some(AuthMethod::Manual);
+                AgentResponse::AuthPending
+            }
+        }
+    };
+    drop(reg);
+    response
 }
 
 async fn execute_forwarded(
@@ -708,9 +1000,8 @@ async fn execute_forwarded(
         return AgentResponse::Failed(format!("invalid HTTP method '{}'", wire.method));
     };
     // Authoritative gate: classify the request by method+path (market data,
-    // account read, or order mutation) and refuse anything above the agent's
-    // configured tier. The agent — not the client — is the trust boundary for
-    // this, so the policy is enforced here on every forwarded request.
+    // account read, or order mutation) and refuse anything above this connection's
+    // granted tier. The agent — not the client — is the trust boundary.
     let required = required_access_for(method.as_str(), &wire.path);
     if !access.permits(required) {
         return AgentResponse::Failed(access_denied(required, access));
@@ -734,8 +1025,8 @@ async fn execute_forwarded(
 mod tests {
     use super::*;
 
-    /// A stub executor that echoes the request path back as the response body,
-    /// so a round-trip proves the request crossed the socket intact.
+    /// A stub executor that echoes the request path back as the response body, so a
+    /// round-trip proves the request crossed the socket intact.
     #[derive(Debug)]
     struct EchoExecutor;
 
@@ -769,26 +1060,28 @@ mod tests {
         panic!("socket never appeared");
     }
 
-    /// Spawns an echo agent at `access` and returns its one-time token alongside
-    /// the handle.
-    fn spawn_echo(
+    fn spawn_agent(
         socket: PathBuf,
-        access: AccessLevel,
-    ) -> (String, tokio::task::JoinHandle<Result<()>>) {
-        let token = AuthToken::generate().unwrap();
-        let secret = token.as_str().to_owned();
-        let handle = tokio::spawn(async move {
-            serve(Arc::new(EchoExecutor), &socket, access, token, || {}).await
-        });
-        (secret, handle)
+        ceiling: AccessLevel,
+        token: Option<AuthToken>,
+    ) -> (AgentControl, tokio::task::JoinHandle<Result<()>>) {
+        let (server, control) = AgentServer::new(Arc::new(EchoExecutor), ceiling, token);
+        let handle = tokio::spawn(async move { server.run(&socket).await });
+        (control, handle)
+    }
+
+    /// Id of the single live connection (asserts there is exactly one).
+    fn only_id(control: &AgentControl) -> ConnId {
+        let conns = control.list();
+        assert_eq!(conns.len(), 1, "expected exactly one connection");
+        conns[0].id
     }
 
     #[test]
     fn token_generate_is_unique_and_verifies_in_constant_time() {
         let a = AuthToken::generate().unwrap();
         let b = AuthToken::generate().unwrap();
-        assert_ne!(a.as_str(), b.as_str(), "tokens must be unique");
-        assert!(!a.as_str().is_empty());
+        assert_ne!(a.as_str(), b.as_str());
         assert!(a.verify(a.as_str()));
         assert!(!a.verify(b.as_str()));
         assert!(!a.verify(""));
@@ -797,60 +1090,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_round_trips_and_reports_capabilities() {
+    async fn token_auth_round_trips_and_reports_capabilities() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
+        let token = AuthToken::generate().unwrap();
+        let secret = token.as_str().to_owned();
+        let (control, server) = spawn_agent(socket.clone(), AccessLevel::View, Some(token));
         wait_for(&socket).await;
 
-        let executor = AgentExecutor::connect(&socket).await.unwrap();
-        // Before authentication the agent reveals nothing and refuses requests.
-        assert!(!executor.is_session_authenticated());
-        assert_eq!(executor.base_url(), "");
-        let err = executor
-            .execute(RequestSpec::get("/balances"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::Agent { .. }));
+        let exec = AgentExecutor::connect(&socket).await.unwrap();
+        assert!(!exec.is_session_authenticated());
+        // Refused before authorizing.
+        assert!(exec.execute(RequestSpec::get("/tickers")).await.is_err());
 
-        // Authenticating reveals the agent's base URL and access policy.
-        executor.authenticate(&token).await.unwrap();
-        assert!(executor.is_session_authenticated());
-        assert_eq!(executor.base_url(), "http://stub/api/1.0");
-        assert_eq!(executor.access(), AccessLevel::View);
+        exec.authenticate(&secret).await.unwrap();
+        assert!(exec.is_session_authenticated());
+        assert_eq!(exec.base_url(), "http://stub/api/1.0");
+        assert_eq!(exec.access(), AccessLevel::View);
 
-        executor.ping().await.unwrap();
-        // A single persistent connection carries many requests.
-        let raw = executor
-            .execute(RequestSpec::get("/balances"))
-            .await
-            .unwrap();
-        assert_eq!(raw.status, 200);
-        assert_eq!(raw.body, b"/balances");
-        let raw = executor
+        let raw = exec
             .execute(RequestSpec::get("/orders/active"))
             .await
             .unwrap();
         assert_eq!(raw.body, b"/orders/active");
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn wrong_token_is_refused_then_correct_token_still_works() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
-        wait_for(&socket).await;
-
-        let executor = AgentExecutor::connect(&socket).await.unwrap();
-        // A wrong guess is rejected and does NOT spend the token; the connection
-        // stays open so the right token still authenticates it.
-        assert!(executor.authenticate("not-the-token").await.is_err());
-        assert!(!executor.is_session_authenticated());
-        executor.authenticate(&token).await.unwrap();
-        assert!(executor.is_session_authenticated());
-
+        // The registry shows it token-authorized at the ceiling.
+        let info = &control.list()[0];
+        assert!(matches!(
+            info.state,
+            ConnState::Authorized {
+                access: AccessLevel::View
+            }
+        ));
+        assert_eq!(info.method, Some(AuthMethod::Token));
         server.abort();
     }
 
@@ -858,162 +1129,179 @@ mod tests {
     async fn token_is_single_use_across_connections() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
-        wait_for(&socket).await;
-
-        // First client consumes the token and owns the oracle.
-        let first = AgentExecutor::connect(&socket).await.unwrap();
-        first.authenticate(&token).await.unwrap();
-        first.ping().await.unwrap();
-
-        // A second client connects but the token is already spent.
-        let second = AgentExecutor::connect(&socket).await.unwrap();
-        assert!(second.authenticate(&token).await.is_err());
-        assert!(!second.is_session_authenticated());
-
-        // The first client is unaffected.
-        first.ping().await.unwrap();
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn view_access_allows_reads_refuses_mutations() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
-        wait_for(&socket).await;
-
-        let executor = AgentExecutor::connect(&socket).await.unwrap();
-        executor.authenticate(&token).await.unwrap();
-        assert_eq!(executor.access(), AccessLevel::View);
-
-        // Account reads are allowed at the view tier.
-        executor
-            .execute(RequestSpec::get("/orders/active"))
-            .await
-            .unwrap();
-        // A non-GET (order mutation) is refused by the agent itself.
-        let err = executor
-            .execute(RequestSpec::delete("/orders/abc"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::Agent { .. }));
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn market_access_allows_only_public_data() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), AccessLevel::Market);
-        wait_for(&socket).await;
-
-        let executor = AgentExecutor::connect(&socket).await.unwrap();
-        executor.authenticate(&token).await.unwrap();
-        assert_eq!(executor.access(), AccessLevel::Market);
-
-        // Public market data is allowed.
-        let raw = executor
-            .execute(RequestSpec::get("/tickers"))
-            .await
-            .unwrap();
-        assert_eq!(raw.body, b"/tickers");
-        // Personal account reads are refused at the market tier...
-        for path in ["/balances", "/orders/active", "/trades/private/BTC-USD"] {
-            let err = executor.execute(RequestSpec::get(path)).await.unwrap_err();
-            assert!(matches!(err, Error::Agent { .. }), "should refuse {path}");
-        }
-        // ...as is any order mutation.
-        let err = executor
-            .execute(RequestSpec::delete("/orders/abc"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::Agent { .. }));
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn trading_access_allows_mutations() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), AccessLevel::Trading);
-        wait_for(&socket).await;
-
-        let executor = AgentExecutor::connect(&socket).await.unwrap();
-        executor.authenticate(&token).await.unwrap();
-        assert_eq!(executor.access(), AccessLevel::Trading);
-        let raw = executor
-            .execute(RequestSpec::delete("/orders/abc"))
-            .await
-            .unwrap();
-        assert_eq!(raw.body, b"/orders/abc");
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn on_connect_fires_once_on_authentication_not_on_accept() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("agent.sock");
-
         let token = AuthToken::generate().unwrap();
         let secret = token.as_str().to_owned();
-        let connects = Arc::new(AtomicU64::new(0));
-        let on_connect = {
-            let connects = Arc::clone(&connects);
-            move || {
-                connects.fetch_add(1, Ordering::Relaxed);
-            }
-        };
-        let server = {
-            let socket = socket.clone();
-            tokio::spawn(async move {
-                serve(
-                    Arc::new(EchoExecutor),
-                    &socket,
-                    AccessLevel::View,
-                    token,
-                    on_connect,
-                )
-                .await
-            })
-        };
+        let (_control, server) = spawn_agent(socket.clone(), AccessLevel::View, Some(token));
         wait_for(&socket).await;
 
-        // Merely connecting must NOT fire on_connect.
-        let executor = AgentExecutor::connect(&socket).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(connects.load(Ordering::Relaxed), 0, "not authenticated yet");
-
-        // Authenticating fires it exactly once, regardless of later requests.
-        executor.authenticate(&secret).await.unwrap();
-        executor.ping().await.unwrap();
-        executor.ping().await.unwrap();
-        assert_eq!(connects.load(Ordering::Relaxed), 1);
-
+        let first = AgentExecutor::connect(&socket).await.unwrap();
+        first.authenticate(&secret).await.unwrap();
+        // A second client presenting the spent token is refused.
+        let second = AgentExecutor::connect(&socket).await.unwrap();
+        assert!(second.authenticate(&secret).await.is_err());
+        first.ping().await.unwrap();
         server.abort();
     }
 
     #[tokio::test]
-    async fn serve_returns_when_the_authenticated_client_disconnects() {
+    async fn manual_pending_then_grant_authorizes_and_enforces_access() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("agent.sock");
-        let (token, server) = spawn_echo(socket.clone(), AccessLevel::View);
+        let (control, server) = spawn_agent(socket.clone(), AccessLevel::Trading, None);
         wait_for(&socket).await;
 
-        let executor = AgentExecutor::connect(&socket).await.unwrap();
-        executor.authenticate(&token).await.unwrap();
-        executor.ping().await.unwrap();
-        // Dropping the authenticated client ends its session, so `serve` returns.
-        drop(executor);
+        // No token configured -> the token path is refused.
+        let exec = AgentExecutor::connect(&socket).await.unwrap();
+        assert!(exec.authenticate("anything").await.is_err());
+
+        // Request manual auth -> pending, visible with peer creds + label.
+        let outcome = exec
+            .request_authorization(Some("collector"), AccessLevel::Market)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, AuthOutcome::Pending));
+        let info = control.list()[0].clone();
+        assert_eq!(info.label.as_deref(), Some("collector"));
+        assert!(matches!(
+            info.state,
+            ConnState::Pending {
+                requested: AccessLevel::Market
+            }
+        ));
+        assert_ne!(info.peer.uid, u32::MAX, "peer uid should be readable");
+
+        // Grant at the requested level; the next poll is authorized.
+        assert_eq!(control.grant(info.id, None).unwrap(), AccessLevel::Market);
+        let outcome = exec
+            .request_authorization(Some("collector"), AccessLevel::Market)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, AuthOutcome::Authorized(_)));
+        assert_eq!(exec.access(), AccessLevel::Market);
+
+        // Market access: public data ok, account read refused.
+        assert!(exec.execute(RequestSpec::get("/tickers")).await.is_ok());
+        assert!(exec.execute(RequestSpec::get("/balances")).await.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn manual_deny_is_reported_and_refuses_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (control, server) = spawn_agent(socket.clone(), AccessLevel::Market, None);
+        wait_for(&socket).await;
+
+        let exec = AgentExecutor::connect(&socket).await.unwrap();
+        exec.request_authorization(None, AccessLevel::Market)
+            .await
+            .unwrap();
+        control.deny(only_id(&control)).unwrap();
+        let outcome = exec
+            .request_authorization(None, AccessLevel::Market)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, AuthOutcome::Denied(_)));
+        assert!(exec.execute(RequestSpec::get("/tickers")).await.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn two_clients_authorized_at_different_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (control, server) = spawn_agent(socket.clone(), AccessLevel::View, None);
+        wait_for(&socket).await;
+
+        let a = AgentExecutor::connect(&socket).await.unwrap();
+        let b = AgentExecutor::connect(&socket).await.unwrap();
+        a.request_authorization(Some("a"), AccessLevel::Market)
+            .await
+            .unwrap();
+        b.request_authorization(Some("b"), AccessLevel::View)
+            .await
+            .unwrap();
+
+        // Grant each by looking up its id via label.
+        for info in control.list() {
+            let level = if info.label.as_deref() == Some("a") {
+                AccessLevel::Market
+            } else {
+                AccessLevel::View
+            };
+            control.grant(info.id, Some(level)).unwrap();
+        }
+        a.request_authorization(Some("a"), AccessLevel::Market)
+            .await
+            .unwrap();
+        b.request_authorization(Some("b"), AccessLevel::View)
+            .await
+            .unwrap();
+
+        // a (market) cannot read the account; b (view) can. Per-connection access.
+        assert!(a.execute(RequestSpec::get("/balances")).await.is_err());
+        assert!(b.execute(RequestSpec::get("/balances")).await.is_ok());
+        assert_eq!(control.active_count(), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn grant_above_ceiling_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (control, server) = spawn_agent(socket.clone(), AccessLevel::Market, None);
+        wait_for(&socket).await;
+
+        let exec = AgentExecutor::connect(&socket).await.unwrap();
+        exec.request_authorization(None, AccessLevel::Market)
+            .await
+            .unwrap();
+        let id = only_id(&control);
+        assert!(control.grant(id, Some(AccessLevel::Trading)).is_err());
+        // A refused grant leaves the connection pending.
+        assert!(matches!(control.list()[0].state, ConnState::Pending { .. }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn active_count_drops_when_the_client_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (control, server) = spawn_agent(socket.clone(), AccessLevel::Market, None);
+        wait_for(&socket).await;
+
+        let exec = AgentExecutor::connect(&socket).await.unwrap();
+        exec.request_authorization(None, AccessLevel::Market)
+            .await
+            .unwrap();
+        control.grant(only_id(&control), None).unwrap();
+        exec.request_authorization(None, AccessLevel::Market)
+            .await
+            .unwrap();
+        assert_eq!(control.active_count(), 1);
+
+        // The handler removes the entry on disconnect, so the idle signal drops.
+        drop(exec);
+        for _ in 0..200 {
+            if control.active_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(control.active_count(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let (control, server) = spawn_agent(socket.clone(), AccessLevel::Market, None);
+        wait_for(&socket).await;
+        control.shutdown();
         let outcome = tokio::time::timeout(Duration::from_secs(2), server)
             .await
-            .expect("serve should return after the authenticated client leaves");
+            .expect("server should return after shutdown");
         assert!(outcome.unwrap().is_ok());
     }
 }

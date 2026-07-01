@@ -26,7 +26,7 @@ use crate::{creds, line};
 type Res<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// One line of REPL input: a per-line `--json` toggle plus the shared command
-/// grammar. `no_binary_name` so the first token is the command, not argv[0].
+/// grammar. `no_binary_name` so the first token is the command, not `argv[0]`.
 #[derive(Parser)]
 #[command(no_binary_name = true, about = "Run a revolutx command in the shell.")]
 struct ReplLine {

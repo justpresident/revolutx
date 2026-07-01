@@ -115,7 +115,9 @@ pub mod agent;
 #[cfg(any(feature = "agent", feature = "commands"))]
 pub use access::AccessLevel;
 #[cfg(feature = "agent")]
-pub use agent::{AgentExecutor, AuthToken, default_socket_path, serve};
+pub use agent::{
+    AgentControl, AgentExecutor, AgentServer, AuthOutcome, AuthToken, default_socket_path,
+};
 #[cfg(feature = "rest")]
 pub use auth::{Ed25519Signer, RequestAuth, Signer};
 #[cfg(feature = "rest")]

@@ -7,6 +7,29 @@ library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.m
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-01
+
+`agent start` becomes a persistent, multi-client agent with an interactive operator
+console.
+
+### Added
+
+- Operator console on the agent's stdin: `list` (each connection's id, uid/gid/pid,
+  method, state, label), `grant <id> [market|view|trading]`, `deny <id>`, `help`,
+  `quit`.
+- Manual authorization: a connection with no token becomes *pending* and is granted
+  or denied from the console at a tier the operator picks (up to the `--access`
+  ceiling). Any number of clients can be authorized at once.
+
+### Changed
+
+- `--auth-token` is now optional — a second, headless auth method alongside manual
+  approval, rather than required.
+- `--access` is the grant *ceiling*; `--idle-timeout` now auto-locks after no
+  *authorized* client has been connected for the timeout.
+- The socket is world-connectable and cross-UID clients are allowed and evaluated by
+  the operator (their uid/gid/pid are shown) — the same-UID requirement is dropped.
+
 ## [0.2.1] - 2026-06-30
 
 Modernizes `vault init` on rcypher 0.4's reusable new-store flow (optional FIDO2

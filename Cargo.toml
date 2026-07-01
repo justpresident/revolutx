@@ -1,6 +1,6 @@
 [package]
 name = "revolutx"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.87"
 license = "Apache-2.0"
@@ -67,7 +67,7 @@ bincode = { version = "2", optional = true }
 # OS randomness for `keystore`'s key-pair generation.
 getrandom = { version = "0.3", optional = true }
 # Agent proxy (enabled by the `agent` feature): unix-socket transport + framing.
-tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "time", "sync"], optional = true }
+tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "time", "sync", "macros"], optional = true }
 # Constant-time comparison of the agent's one-time handshake token.
 subtle = { version = "2", optional = true }
 

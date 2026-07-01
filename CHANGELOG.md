@@ -11,6 +11,37 @@ binary changes were logged together in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-01
+
+Reworks the signing agent into a **persistent, multi-client authorizer** with
+per-connection access. Breaking: the agent's public API changed.
+
+### Changed
+
+- The agent serves **many** connections at once and stays up across client
+  reconnects (it no longer exits when a single client disconnects).
+- `AccessLevel` is enforced **per connection**; the tier the agent starts with is now
+  the *ceiling* (max grantable) and the level a token grants.
+- The socket is created world-connectable (`0666`) so cross-UID peers can reach it;
+  nothing is served without a valid token or an explicit operator grant, and the
+  operator sees each peer's uid/gid/pid.
+
+### Added
+
+- `AgentServer` / `AgentControl` — build and run a multi-client agent and drive
+  authorization (list connections with their peer credentials, grant at a chosen
+  tier, deny, shut down) out of band.
+- `AgentRequest::RequestAuth` + `AgentResponse::{AuthPending, AuthDenied}` — a manual
+  authorization handshake a client polls until the operator decides.
+- `AgentExecutor::request_authorization` + `AuthOutcome` — the client side of the
+  manual flow.
+- `ConnId`, `PeerCred`, `AuthMethod`, `ConnState`, `ConnectionInfo` — connection
+  registry types surfaced to operator tooling.
+
+### Removed
+
+- `serve` — replaced by `AgentServer::new` + `AgentServer::run` (with `AgentControl`).
+
 ## [0.4.0] - 2026-06-30
 
 Adopts rcypher 0.4 for the encrypted vault — a breaking dependency bump for
