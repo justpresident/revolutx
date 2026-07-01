@@ -7,15 +7,6 @@ it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-07-01
-
-### Fixed
-
-- Builds on revolutx 0.5.1: reads larger agent responses (up to 8 MiB) and fails fast on
-  a broken agent connection instead of reading misframed data.
-
-## [0.3.0] - 2026-07-01
-
 ### Added
 
 - Interactive authorization: call `authenticate` with **no token** to request operator
@@ -30,6 +21,11 @@ it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 - Builds on `revolutx` 0.5; the `token` argument to `authenticate` is now optional (the
   token path itself is unchanged). The agent it connects to is now persistent and
   multi-client, so it no longer exits the moment the MCP disconnects.
+
+### Fixed
+
+- Reads larger agent responses (up to 8 MiB) and fails fast on a broken agent connection
+  instead of reading misframed data.
 
 ## [0.2.0] - 2026-06-28
 

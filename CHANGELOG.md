@@ -11,32 +11,9 @@ binary changes were logged together in this file.
 
 ## [Unreleased]
 
-## [0.5.1] - 2026-07-01
-
-### Fixed
-
-- The agent now refuses a forwarded response whose body would overflow the response
-  frame with a `Failed` reply, instead of sending an oversized frame that desynchronized
-  the client connection and broke every later request. The response-frame ceiling is
-  raised to 8 MiB (market-data responses — deep candle windows, all-pairs ticker lists —
-  can be several MiB). `AgentExecutor` also marks its connection unusable after a
-  transport error, so a desync fails fast with a clear "reconnect" error rather than
-  reading misframed bytes.
-
-## [0.5.0] - 2026-07-01
-
 Reworks the signing agent into a **persistent, multi-client authorizer** with
-per-connection access. Breaking: the agent's public API changed.
-
-### Changed
-
-- The agent serves **many** connections at once and stays up across client
-  reconnects (it no longer exits when a single client disconnects).
-- `AccessLevel` is enforced **per connection**; the tier the agent starts with is now
-  the *ceiling* (max grantable) and the level a token grants.
-- The socket is created world-connectable (`0666`) so cross-UID peers can reach it;
-  nothing is served without a valid token or an explicit operator grant, and the
-  operator sees each peer's uid/gid/pid.
+per-connection access, and hardens its transport. Breaking: the agent's public API
+changed.
 
 ### Added
 
@@ -50,9 +27,29 @@ per-connection access. Breaking: the agent's public API changed.
 - `ConnId`, `PeerCred`, `AuthMethod`, `ConnState`, `ConnectionInfo` — connection
   registry types surfaced to operator tooling.
 
+### Changed
+
+- The agent serves **many** connections at once and stays up across client
+  reconnects (it no longer exits when a single client disconnects).
+- `AccessLevel` is enforced **per connection**; the tier the agent starts with is now
+  the *ceiling* (max grantable) and the level a token grants.
+- The socket is created world-connectable (`0666`) so cross-UID peers can reach it;
+  nothing is served without a valid token or an explicit operator grant, and the
+  operator sees each peer's uid/gid/pid.
+- The agent response-frame ceiling is raised 1 MiB → 8 MiB, since legitimate
+  market-data responses (deep candle windows, all-pairs ticker lists) can be several MiB.
+
 ### Removed
 
 - `serve` — replaced by `AgentServer::new` + `AgentServer::run` (with `AgentControl`).
+
+### Fixed
+
+- The agent refuses a forwarded response whose body would overflow the response frame
+  with a `Failed` reply, instead of sending an oversized frame that desynchronized the
+  client connection and broke every later request. `AgentExecutor` also marks its
+  connection unusable after a transport error, so a desync fails fast with a clear
+  "reconnect" error rather than reading misframed bytes.
 
 ## [0.4.0] - 2026-06-30
 
