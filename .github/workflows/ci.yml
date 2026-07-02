@@ -31,6 +31,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      # Ignore only "bincode unmaintained" `advisory while failing
+      # on every other warning category (including future unmaintained/unsound
+      # dependencies) and on vulnerabilities.
+      - name: Audit dependencies
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0141
+
       - name: Format
         run: cargo fmt --all --check
 
