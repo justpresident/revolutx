@@ -140,6 +140,34 @@ async fn order_book_encodes_symbol_in_path() {
 }
 
 #[tokio::test]
+async fn order_book_sorts_both_sides_best_first() {
+    // Production sends BOTH sides price-descending: best-first for bids but
+    // WORST-first for asks. The model must expose best-first on both sides,
+    // whatever the wire order.
+    let level = |side: &str, price: &str| {
+        format!(
+            r#"{{"aid":"ETH","anm":"Ethereum","s":"{side}","p":"{price}","pc":"USD","pn":"MONE","q":"1","qc":"ETH","qn":"UNIT","ve":"REVX","no":"1","ts":"CLOB","pdt":3318215482991}}"#
+        )
+    };
+    let body = format!(
+        r#"{{"data":{{"asks":[{},{}],"bids":[{},{}]}},"metadata":{{"timestamp":1}}}}"#,
+        level("SELL", "4700"), // worst ask first, as the exchange sends it
+        level("SELL", "4600"),
+        level("BUYI", "4550"), // bids arrive best-first already
+        level("BUYI", "4500"),
+    );
+    let server = MockServer::start(200, &body);
+    let client = auth_client(server.base_url());
+
+    let book = client.market_data().order_book("BTC-USD").await.unwrap();
+
+    assert_eq!(book.asks[0].price, dec("4600")); // lowest ask at the touch
+    assert_eq!(book.asks[1].price, dec("4700"));
+    assert_eq!(book.bids[0].price, dec("4550")); // highest bid at the touch
+    assert_eq!(book.bids[1].price, dec("4500"));
+}
+
+#[tokio::test]
 async fn order_book_normalizes_slash_symbol_to_dash_path() {
     // A pairs-map key (`BTC/USD`) reaches the wire in the dash form the exchange
     // accepts, not percent-encoded (`BTC%2FUSD`).

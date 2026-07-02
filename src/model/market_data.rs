@@ -72,12 +72,15 @@ pub struct OrderBookLevel {
 /// Used by both the authenticated and public order-book endpoints; the only
 /// wire difference (millisecond vs ISO-8601 timestamps) is absorbed by
 /// [`Timestamp`].
+///
+/// Both sides are **best-first** regardless of wire order: `bids[0]` is the
+/// highest bid and `asks[0]` the lowest ask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawOrderBook")]
 pub struct OrderBook {
-    /// Ask (sell) levels.
+    /// Ask (sell) levels, best (lowest price) first.
     pub asks: Vec<OrderBookLevel>,
-    /// Bid (buy) levels.
+    /// Bid (buy) levels, best (highest price) first.
     pub bids: Vec<OrderBookLevel>,
     /// When the snapshot was generated.
     pub timestamp: Timestamp,
@@ -102,9 +105,18 @@ struct RawTimestampMeta {
 
 impl From<RawOrderBook> for OrderBook {
     fn from(raw: RawOrderBook) -> Self {
+        let mut asks = raw.data.asks;
+        let mut bids = raw.data.bids;
+        // The exchange sends BOTH sides price-descending (measured in
+        // production, 2026-07-02): best-first for bids but WORST-first for
+        // asks. Impose best-first on both sides instead of exposing wire
+        // order — a consumer walking `asks` from index 0 must start at the
+        // touch. Stable sorts: equal-price levels keep their wire order.
+        asks.sort_by_key(|level| level.price);
+        bids.sort_by_key(|level| std::cmp::Reverse(level.price));
         Self {
-            asks: raw.data.asks,
-            bids: raw.data.bids,
+            asks,
+            bids,
             timestamp: raw.metadata.timestamp,
         }
     }

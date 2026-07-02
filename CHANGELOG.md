@@ -9,6 +9,18 @@ The binaries track their changes in their own changelogs:
 [`mcp/CHANGELOG.md`](mcp/CHANGELOG.md) (`revolutx-mcp`). Through 0.3.0, library and
 binary changes were logged together in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- `OrderBook` now guarantees **best-first ordering** on both sides (`bids`
+  price-descending, `asks` price-ascending; stable for equal prices), and its
+  docs say so. The exchange returns *both* sides price-descending — best-first
+  for bids but **worst-first for asks** — and the SDK passed that wire order
+  through, so `asks[0]` was the worst ask of every snapshot (measured in
+  production, 2026-07-02). Consumers walking the book from index 0 saw
+  inverted ask ladders.
+
 ## [0.5.0] - 2026-07-02
 
 Reworks the signing agent into a **persistent, multi-client authorizer** with
