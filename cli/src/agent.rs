@@ -162,7 +162,12 @@ fn console_loop(control: &AgentControl) {
 /// Interactive console: a `rustyline` line editor with a `> ` prompt, in-memory
 /// (session-only, never persisted to disk) history, and completion.
 fn interactive_console(control: &AgentControl) {
-    let mut editor = match Editor::<ConsoleHelper, DefaultHistory>::new() {
+    // `List` shows all candidates at once (like a shell) rather than cycling
+    // through them in place on each Tab (the default `Circular`).
+    let config = rustyline::Config::builder()
+        .completion_type(rustyline::CompletionType::List)
+        .build();
+    let mut editor = match Editor::<ConsoleHelper, DefaultHistory>::with_config(config) {
         Ok(editor) => editor,
         Err(e) => {
             eprintln!("revolutx-agent: line editor unavailable ({e}); reading plainly");
