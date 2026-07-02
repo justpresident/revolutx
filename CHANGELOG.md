@@ -11,6 +11,15 @@ binary changes were logged together in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `Error::is_connection_unusable()` and a distinct `Error::AgentUnusable` variant
+  (agent feature): a transport error on the signing-agent stream now surfaces as
+  a typed, permanently-unusable condition rather than a generic `Agent` error, so
+  clients can reliably decide to reconnect without string-matching the message.
+  The `AgentExecutor`'s send/read failures and its broken-connection guard emit
+  it.
+
 ### Fixed
 
 - `OrderBook` now guarantees **best-first ordering** on both sides (`bids`

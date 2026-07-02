@@ -469,8 +469,8 @@ impl AgentExecutor {
 
     async fn round_trip(&self, request: &AgentRequest) -> Result<AgentResponse> {
         if self.broken.load(Ordering::Acquire) {
-            return Err(Error::agent(
-                "agent connection is unusable after a transport error; reconnect to continue",
+            return Err(Error::agent_unusable(
+                "connection was marked broken by an earlier transport error; reconnect to continue",
             ));
         }
         // Hold the connection lock only for the write/read critical section, so a
@@ -483,7 +483,7 @@ impl AgentExecutor {
             let mut conn = self.conn.lock().await;
             if let Err(e) = write_frame(&mut conn, request).await {
                 self.broken.store(true, Ordering::Release);
-                return Err(Error::agent(format!(
+                return Err(Error::agent_unusable(format!(
                     "failed to send request to agent: {e}"
                 )));
             }
@@ -491,7 +491,9 @@ impl AgentExecutor {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     self.broken.store(true, Ordering::Release);
-                    return Err(Error::agent(format!("failed to read agent response: {e}")));
+                    return Err(Error::agent_unusable(format!(
+                        "failed to read agent response: {e}"
+                    )));
                 }
             }
         };

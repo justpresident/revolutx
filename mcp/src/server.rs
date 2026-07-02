@@ -180,6 +180,19 @@ impl Server {
                 Ok(text) => success(id, tool_content(text, false)),
                 Err(e) => success(id, tool_content(e.to_string(), true)),
             },
+            // A broken agent connection never recovers on the same executor:
+            // drop the dead session so the next call reconnects, and tell the
+            // caller to re-authenticate rather than repeating the same error.
+            Err(e) if e.is_connection_unusable() => {
+                *self.session.lock().await = None;
+                success(
+                    id,
+                    tool_content(
+                        format!("{e}. The agent connection was lost — call `authenticate` again."),
+                        true,
+                    ),
+                )
+            }
             Err(e) => success(id, tool_content(e.to_string(), true)),
         }
     }

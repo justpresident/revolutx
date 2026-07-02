@@ -119,6 +119,19 @@ pub enum Error {
         message: String,
     },
 
+    /// The signing-agent connection is **unusable**: a transport error on send
+    /// or read desynchronized the stream (or it was already marked broken), so
+    /// it can never be trusted again. Unlike a one-off [`Agent`](Self::Agent)
+    /// error, retrying on the same connection is futile — the caller must
+    /// reconnect with a fresh [`AgentExecutor`](crate::agent::AgentExecutor).
+    /// Detect it with [`is_connection_unusable`](Self::is_connection_unusable).
+    #[cfg(feature = "agent")]
+    #[error("agent connection unusable: {message}")]
+    AgentUnusable {
+        /// Description of the transport failure that broke the connection.
+        message: String,
+    },
+
     /// The server returned a status or body the SDK could not classify as a
     /// normal API error.
     #[error("unexpected response: HTTP {status}: {body}")]
@@ -148,6 +161,13 @@ impl Error {
     #[cfg(feature = "agent")]
     pub(crate) fn agent(message: impl Into<String>) -> Self {
         Self::Agent {
+            message: message.into(),
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    pub(crate) fn agent_unusable(message: impl Into<String>) -> Self {
+        Self::AgentUnusable {
             message: message.into(),
         }
     }
@@ -200,6 +220,22 @@ impl Error {
     /// parsed from the `Retry-After` header.
     pub fn retry_after(&self) -> Option<Duration> {
         self.api_error().and_then(|api| api.retry_after)
+    }
+
+    /// Returns `true` if the signing-agent connection is permanently unusable
+    /// (a transport error broke the stream). The caller must reconnect with a
+    /// fresh [`AgentExecutor`](crate::agent::AgentExecutor); retrying on the
+    /// same connection will only reproduce this error. Always `false` without
+    /// the `agent` feature.
+    pub const fn is_connection_unusable(&self) -> bool {
+        #[cfg(feature = "agent")]
+        {
+            matches!(self, Self::AgentUnusable { .. })
+        }
+        #[cfg(not(feature = "agent"))]
+        {
+            false
+        }
     }
 }
 
@@ -453,5 +489,16 @@ mod tests {
         assert!(matches!(err, Error::Unexpected { status: 418, .. }));
         assert_eq!(err.status(), Some(418));
         assert!(err.api_error().is_none());
+    }
+
+    #[cfg(feature = "agent")]
+    #[test]
+    fn only_agent_unusable_is_a_dead_connection() {
+        assert!(
+            Error::agent_unusable("failed to read agent response: eof").is_connection_unusable()
+        );
+        // An ordinary agent error (e.g. an execution/auth failure) is not.
+        assert!(!Error::agent("order rejected").is_connection_unusable());
+        assert!(!Error::MissingCredentials.is_connection_unusable());
     }
 }

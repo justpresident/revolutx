@@ -5,6 +5,14 @@ All notable changes to the `revolutx-mcp` server are documented here, following
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The `revolutx` library
 it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 
+## [Unreleased]
+
+### Changed
+
+- On a tool call, a lost agent connection (`Error::is_connection_unusable`) now
+  drops the stale session and returns a clear "call `authenticate` again" hint,
+  instead of repeating the same transport error until the caller reconnects.
+
 ## [0.3.0] - 2026-07-02
 
 ### Added
