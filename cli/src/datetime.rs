@@ -2,7 +2,9 @@
 //!
 //! Accepts a calendar date (`2024-01-31`), a date and time (`"2024-01-31 14:30"`
 //! or `2024-01-31T14:30:00`), a full RFC 3339 timestamp, a relative offset before
-//! now (`7d`, `24h`, `30m`, `45s`, `2w`, or `now`), or raw epoch milliseconds.
+//! now (`7d`, `24h`, `30m`, `45s`, `2w`, or `now`), or a raw epoch integer.
+//! A raw integer is auto-detected as seconds or milliseconds by magnitude (see
+//! [`epoch_millis`]), so a pasted seconds value is not silently read as 1970.
 //! Naive forms are interpreted as UTC. Returns Unix epoch milliseconds — what the
 //! API expects — so it plugs in as a clap `value_parser` and the rest of the code
 //! keeps working with `i64`.
@@ -44,17 +46,35 @@ pub fn parse_when(input: &str) -> Result<i64, DateParseError> {
             return Ok(millis);
         }
     }
-    if let Ok(millis) = s.parse::<i64>() {
-        return Ok(millis);
+    if let Ok(n) = s.parse::<i64>() {
+        return Ok(epoch_millis(n));
     }
     Err(DateParseError(format!(
         "invalid date/time '{input}' — use e.g. 2024-01-31, \"2024-01-31 14:30\", an RFC3339 \
-         timestamp, a relative 7d/24h/30m, or epoch milliseconds"
+         timestamp, a relative 7d/24h/30m, or epoch seconds/milliseconds"
     )))
 }
 
+/// Magnitude at or above which a bare epoch integer is read as milliseconds, and
+/// below which as seconds (then scaled up). `1e11` ms is ~1973 and `1e11` s is
+/// ~year 5138, so every realistic exchange timestamp is unambiguous either way —
+/// this only reinterprets pre-1973 millisecond values, which no query uses.
+const SECONDS_MS_BOUNDARY: i64 = 100_000_000_000;
+
+/// Normalizes a raw epoch integer to milliseconds, treating small magnitudes as
+/// seconds so a pasted seconds value is not read as an instant in early 1970.
+const fn epoch_millis(n: i64) -> i64 {
+    if n.abs() < SECONDS_MS_BOUNDARY {
+        n * 1000
+    } else {
+        n
+    }
+}
+
 const fn millis_of(odt: OffsetDateTime) -> i64 {
-    odt.unix_timestamp() * 1000
+    // Add the millisecond component so sub-second precision (e.g. RFC3339 `.500`)
+    // is preserved rather than truncated by a bare seconds×1000 conversion.
+    odt.unix_timestamp() * 1000 + odt.millisecond() as i64
 }
 
 /// `7d`, `24h`, `30m`, `45s`, `2w`, or `now` → an instant at or before now.
@@ -113,6 +133,21 @@ mod tests {
             1_706_711_400_000
         );
         assert_eq!(parse_when("1706659200000").unwrap(), 1_706_659_200_000);
+    }
+
+    #[test]
+    fn bare_epoch_seconds_are_scaled_to_millis() {
+        // A pasted seconds value is detected by magnitude and scaled, not read as
+        // an instant 1000× too early.
+        assert_eq!(parse_when("1706659200").unwrap(), 1_706_659_200_000);
+    }
+
+    #[test]
+    fn rfc3339_subsecond_precision_is_preserved() {
+        assert_eq!(
+            parse_when("2024-01-31T14:30:00.500Z").unwrap(),
+            1_706_711_400_500
+        );
     }
 
     #[test]

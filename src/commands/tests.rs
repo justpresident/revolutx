@@ -5,13 +5,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::{Command, CommandOutput, JsonPresenter, PlaceLimit, PlaceMarket, Presenter, execute};
+use super::{
+    Command, CommandOutput, JsonPresenter, PlaceLimit, PlaceMarket, Presenter, ReplaceOrder,
+    execute,
+};
 use crate::api::market_data::CandlesQuery;
 use crate::api::orders::{ActiveOrdersQuery, HistoricalOrdersQuery};
 use crate::api::trades::TradesQuery;
-use crate::model::orders::OrderReplacementRequest;
 use crate::transport::{BoxFuture, RawResponse, RequestExecutor, RequestSpec};
-use crate::{ClientOrderId, Decimal, OrderId, Result, RevolutXClient, Side};
+use crate::{Decimal, OrderId, Result, RevolutXClient, Side};
 
 /// Records the `(method, path)` the SDK built and returns a canned response.
 struct Recorder {
@@ -169,20 +171,35 @@ async fn routes_every_command_to_its_endpoint() {
         route(market).await,
         ("POST".to_owned(), "/orders".to_owned())
     );
-    let replace = Command::Replace {
+    let replace = Command::Replace(ReplaceOrder {
         id: OrderId::new("abc"),
-        request: OrderReplacementRequest {
-            client_order_id: ClientOrderId::default(),
-            base_size: None,
-            quote_size: None,
-            price: None,
-            execution_instructions: None,
-        },
-    };
+        size: None,
+        price: Some(Decimal::from(1)),
+        in_quote: false,
+        post_only: false,
+        client_order_id: None,
+    });
     assert_eq!(
         route(replace).await,
         ("PUT".to_owned(), "/orders/abc".to_owned())
     );
+}
+
+#[tokio::test]
+async fn replace_requires_at_least_one_of_size_or_price() {
+    let (client, _recorder) = client_with(204, "");
+    let empty = Command::Replace(ReplaceOrder {
+        id: OrderId::new("abc"),
+        size: None,
+        price: None,
+        in_quote: false,
+        post_only: false,
+        client_order_id: None,
+    });
+    let err = execute(&client, empty)
+        .await
+        .expect_err("an empty replacement must be rejected");
+    assert!(matches!(err, crate::Error::InvalidRequest { .. }));
 }
 
 #[tokio::test]

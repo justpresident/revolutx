@@ -6,37 +6,13 @@
 //! (only the unauthenticated market-data endpoints work). This is the loader
 //! shared by the interface crates (MCP, CLI) and the examples.
 
+use crate::error::{Error, Result};
 use crate::{Environment, RevolutXClient};
 
 const ENV_API_KEY: &str = "REVOLUTX_API_KEY";
 const ENV_PRIVATE_KEY_PEM: &str = "REVOLUTX_PRIVATE_KEY_PEM";
 const ENV_PRIVATE_KEY_PATH: &str = "REVOLUTX_PRIVATE_KEY_PATH";
 const ENV_ENVIRONMENT: &str = "REVOLUTX_ENVIRONMENT";
-
-/// Error building a client from configuration.
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    /// The private key file could not be read.
-    #[error("could not read private key file '{path}': {source}")]
-    KeyFile {
-        /// Path that failed to read.
-        path: String,
-        /// Underlying I/O error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// An API key was provided without a private key.
-    #[error(
-        "an API key was provided but no private key (set {ENV_PRIVATE_KEY_PEM} or {ENV_PRIVATE_KEY_PATH})"
-    )]
-    MissingPrivateKey,
-    /// A private key was provided without an API key.
-    #[error("a private key was provided but no API key (set {ENV_API_KEY})")]
-    MissingApiKey,
-    /// The underlying client builder rejected the configuration.
-    #[error(transparent)]
-    Client(#[from] crate::Error),
-}
 
 /// Resolved configuration for building a [`RevolutXClient`].
 ///
@@ -99,8 +75,10 @@ impl ClientConfig {
     }
 
     /// Builds a [`RevolutXClient`]. With no credentials a public-only client is
-    /// returned; with exactly one half of the credentials, an error.
-    pub fn build(self) -> Result<RevolutXClient, ConfigError> {
+    /// returned; with exactly one half of the credentials, an error. All failure
+    /// modes surface as the crate's [`Error`], so a caller handles configuration
+    /// and build errors uniformly.
+    pub fn build(self) -> Result<RevolutXClient> {
         let environment = self.environment.unwrap_or(Environment::Production);
         let mut builder = RevolutXClient::builder().environment(environment);
 
@@ -109,7 +87,7 @@ impl ClientConfig {
             None => match self.private_key_path {
                 Some(path) => Some(
                     std::fs::read_to_string(&path)
-                        .map_err(|source| ConfigError::KeyFile { path, source })?,
+                        .map_err(|source| Error::KeyFile { path, source })?,
                 ),
                 None => None,
             },
@@ -120,16 +98,16 @@ impl ClientConfig {
                 builder = builder.api_key(api_key).private_key_pem(pem);
             }
             (None, None) => {}
-            (Some(_), None) => return Err(ConfigError::MissingPrivateKey),
-            (None, Some(_)) => return Err(ConfigError::MissingApiKey),
+            (Some(_), None) => return Err(Error::MissingPrivateKey),
+            (None, Some(_)) => return Err(Error::MissingApiKey),
         }
 
-        Ok(builder.build()?)
+        builder.build()
     }
 }
 
 /// Convenience: build a client entirely from the environment.
-pub fn client_from_env() -> Result<RevolutXClient, ConfigError> {
+pub fn client_from_env() -> Result<RevolutXClient> {
     ClientConfig::from_env().build()
 }
 
@@ -189,7 +167,7 @@ mod tests {
         }
         .build()
         .unwrap_err();
-        assert!(matches!(err, ConfigError::MissingPrivateKey));
+        assert!(matches!(err, Error::MissingPrivateKey));
 
         let err = ClientConfig {
             private_key_pem: Some("pem".into()),
@@ -197,7 +175,7 @@ mod tests {
         }
         .build()
         .unwrap_err();
-        assert!(matches!(err, ConfigError::MissingApiKey));
+        assert!(matches!(err, Error::MissingApiKey));
     }
 
     #[test]
@@ -209,6 +187,6 @@ mod tests {
         }
         .build()
         .unwrap_err();
-        assert!(matches!(err, ConfigError::KeyFile { .. }));
+        assert!(matches!(err, Error::KeyFile { .. }));
     }
 }

@@ -7,7 +7,6 @@
 //! confirmation instead of requiring `--yes`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
 use revolutx::commands;
@@ -30,8 +29,9 @@ type Res<T = ()> = Result<T, Box<dyn std::error::Error>>;
 #[derive(Parser)]
 #[command(no_binary_name = true, about = "Run a revolutx command in the shell.")]
 struct ReplLine {
-    /// Print raw JSON for this command.
-    #[arg(long)]
+    /// Print raw JSON for this command. `global` so it is accepted before or
+    /// after the command (`balances --json`, not only `--json balances`).
+    #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
     command: ArgCommand,
@@ -55,6 +55,8 @@ pub fn run(global: &GlobalOpts, access: AccessLevel) -> Res {
         .build();
     let mut editor: Editor<ReplHelper, DefaultHistory> = Editor::with_config(config)?;
     editor.set_helper(Some(ReplHelper::new(symbols)));
+    // History is in-memory for this session only — not persisted to disk (a
+    // secure, encrypted history store is planned separately).
 
     eprintln!("revolutx interactive shell — run a command, `help`, or `exit` (Ctrl-D to quit).");
     loop {
@@ -139,55 +141,36 @@ fn run_line(
             let output = runtime.block_on(commands::execute(client, command))?;
             println!("{}", render(json, &output)?);
         }
-        Action::Watch { symbol, interval } => run_watch(json, runtime, client, &symbol, interval),
+        Action::Watch { symbol, interval } => {
+            // Gate the watch on the session tier too, using the access the command
+            // it polls requires — so the gate keeps holding if watch ever polls
+            // something above market data.
+            let required = commands::Command::OrderBook {
+                symbol: symbol.clone(),
+                limit: None,
+            }
+            .min_access();
+            if !access.permits(required) {
+                return Err(revolutx::access::access_denied(required, access).into());
+            }
+            run_watch(json, runtime, client, &symbol, interval);
+        }
     }
     Ok(())
 }
 
-/// `market watch` in the shell: poll-and-render until the user presses **Enter**.
-///
-/// Ctrl-C is deliberately not the stop key — under ptrace protection a real SIGINT
-/// would kill the watchdog parent and orphan the shell (which is why `main`
-/// ignores SIGINT for the `cli` command). A background thread reads one line and
-/// signals the poll loop to stop.
+/// `market watch` in the shell: poll-and-render until the user presses **Enter**
+/// (see [`crate::watch`] for why Enter, not Ctrl-C, is the stop key). Shares the
+/// poll loop with the one-shot path.
 fn run_watch(json: bool, runtime: &Runtime, client: &RevolutXClient, symbol: &str, interval: u64) {
     println!("watching {symbol} — press Enter to stop.");
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let reader = std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = std::io::stdin().read_line(&mut buf);
-        let _ = tx.send(());
-    });
-
-    let interval = interval.max(1);
-    runtime.block_on(async move {
-        let poll = async {
-            loop {
-                let command = commands::Command::OrderBook {
-                    symbol: symbol.to_owned(),
-                    limit: None,
-                };
-                match commands::execute(client, command).await {
-                    Ok(output) => {
-                        if !json {
-                            println!("--- {symbol} ---");
-                        }
-                        match render(json, &output) {
-                            Ok(text) => println!("{text}"),
-                            Err(e) => eprintln!("watch: {e}"),
-                        }
-                    }
-                    Err(e) => eprintln!("watch: {e}"),
-                }
-                tokio::time::sleep(Duration::from_secs(interval)).await;
-            }
-        };
-        tokio::select! {
-            () = poll => {}
-            _ = rx => {}
-        }
-    });
-    let _ = reader.join();
+    runtime.block_on(crate::watch::poll_order_book(
+        json,
+        client,
+        symbol,
+        interval,
+        crate::watch::enter_pressed(),
+    ));
 }
 
 /// Prints the full help for the deepest subcommand named by the leading tokens,

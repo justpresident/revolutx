@@ -15,7 +15,7 @@ mod present;
 #[cfg(test)]
 mod tests;
 
-pub use command::{Command, PlaceLimit, PlaceMarket, candle_interval};
+pub use command::{Command, PlaceLimit, PlaceMarket, ReplaceOrder, candle_interval, parse_decimal};
 pub use execute::execute;
 pub use output::{CancelAck, CancelAllAck, CommandOutput};
 pub use present::{JsonPresenter, Presenter};

@@ -2,7 +2,7 @@
 name = "revolutx"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "Unofficial Rust SDK for the Revolut X Crypto Exchange REST API"
 readme = "README.md"
@@ -47,7 +47,7 @@ keystore = ["rest", "dep:rcypher"]
 # `RequestSpec`s over a unix socket. Neither the private key nor the API key ever
 # crosses the socket. A one-time handshake token authenticates the peer before
 # the oracle is exposed. Implies `rest`.
-agent = ["rest", "dep:tokio", "dep:bincode", "dep:getrandom", "dep:subtle"]
+agent = ["rest", "dep:tokio", "dep:bincode", "dep:getrandom", "dep:subtle", "dep:libc"]
 
 [dependencies]
 # Shared, always-on: domain models, error types, (de)serialization.
@@ -64,12 +64,15 @@ base64 = { version = "0.22", optional = true }
 zeroize = { version = "1", optional = true }
 rcypher = { version = "0.4", default-features = false, features = ["storage"], optional = true }
 bincode = { version = "2", optional = true }
-# OS randomness for `keystore`'s key-pair generation.
+# OS randomness: Ed25519 key-pair generation (`rest`) and the agent's one-time
+# handshake token (`agent`).
 getrandom = { version = "0.3", optional = true }
 # Agent proxy (enabled by the `agent` feature): unix-socket transport + framing.
 tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "time", "sync", "macros"], optional = true }
 # Constant-time comparison of the agent's one-time handshake token.
 subtle = { version = "2", optional = true }
+# Agent proxy: `geteuid` for validating the socket directory's ownership.
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

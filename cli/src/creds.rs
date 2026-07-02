@@ -30,11 +30,16 @@ const PRIMARY_FACTOR: &str = "primary";
 #[cfg(feature = "fido2")]
 const SECURITY_KEY_FACTOR: &str = "security-key";
 
-const fn environment(global: &GlobalOpts) -> Environment {
-    match global.env {
+const fn environment_of(arg: EnvArg) -> Environment {
+    match arg {
         EnvArg::Production => Environment::Production,
         EnvArg::Dev => Environment::Dev,
     }
+}
+
+/// The effective environment: the `--env` flag, defaulting to production.
+fn environment(global: &GlobalOpts) -> Environment {
+    global.env.map_or(Environment::Production, environment_of)
 }
 
 /// The vault path: `--vault`, else `~/.revolutx/vault`.
@@ -60,7 +65,12 @@ pub fn client(global: &GlobalOpts, needs_auth: bool) -> Res<RevolutXClient> {
 
     if global.insecure_env {
         let mut config = ClientConfig::from_env();
-        config.environment = Some(env);
+        // The `--env` flag wins only when explicitly given; otherwise the value
+        // `from_env` read from `REVOLUTX_ENVIRONMENT` stands — matching config.rs's
+        // "explicit fields first, falling back to the environment" contract.
+        if let Some(arg) = global.env {
+            config.environment = Some(environment_of(arg));
+        }
         return Ok(config.build()?);
     }
 

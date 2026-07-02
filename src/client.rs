@@ -28,12 +28,11 @@ use crate::api::market_data::MarketDataApi;
 use crate::api::orders::OrdersApi;
 use crate::api::trades::TradesApi;
 use crate::auth::{Ed25519Signer, Signer};
-use crate::error::{Error, Result, classify_error_response};
+use crate::error::{Error, Result, classify_error_response, preview};
 use crate::transport::{LocalExecutor, RequestExecutor, RequestSpec};
 
 /// Default request timeout when none is configured.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_BODY_PREVIEW: usize = 2048;
 
 /// Revolut X API environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,18 +322,6 @@ impl ClientBuilder {
             executor: Arc::new(executor),
         })
     }
-}
-
-fn preview(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    if text.len() <= MAX_BODY_PREVIEW {
-        return text.into_owned();
-    }
-    let mut end = MAX_BODY_PREVIEW;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}… ({} bytes total)", &text[..end], bytes.len())
 }
 
 #[cfg(test)]

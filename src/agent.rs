@@ -41,9 +41,12 @@
 //! The socket is created world-connectable (`0666`) so a peer with a different UID
 //! (e.g. a container) can reach it; nothing is served without a valid token or an
 //! explicit operator grant, and the operator sees each peer's uid/gid/pid before
-//! deciding. Placing the socket in a private directory (e.g. `$XDG_RUNTIME_DIR`,
-//! `0700`) additionally restricts it to the agent's own UID. There is no network
-//! transport: a signing agent reachable over TCP would be a "trade as me" oracle.
+//! deciding. The socket's *directory* is the integrity boundary: one the agent
+//! creates is made `0711` (world-traversable so other-UID clients can connect, but
+//! not world-writable), and a pre-existing directory is validated (owned by the
+//! agent or root, and not group/other-writable without the sticky bit) so another
+//! user cannot unlink or replace the socket. There is no network transport: a
+//! signing agent reachable over TCP would be a "trade as me" oracle.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -95,6 +98,26 @@ const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// chatter, since the token is high-entropy and single-use (brute force is
 /// infeasible regardless).
 const MAX_AUTH_ATTEMPTS: u32 = 5;
+
+/// Cap on concurrently-served connections. The socket is world-connectable by
+/// design (the token / operator gate is the trust boundary), so an unprivileged
+/// local peer could otherwise open unbounded connections and exhaust file
+/// descriptors, tasks, and registry entries. Far above any legitimate fan-out
+/// (an MCP server, a CLI, a handful of collectors); excess connections are
+/// refused, not queued.
+const MAX_CONNECTIONS: usize = 64;
+
+/// A freshly-accepted connection must send its first frame within this window.
+/// This reaps silent connections that connect and then send nothing (they would
+/// otherwise park forever in an untimed length-prefix read). Once a connection
+/// has sent a frame it is either authorized, visibly pending operator approval,
+/// or dropped, so later reads stay untimed and idle clients are not disturbed.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Upper bound on a client-supplied connection `label` (bytes). The label is
+/// operator-facing display text; anything longer is truncated on ingest so a
+/// crafted 64 KiB label cannot flood the console.
+const MAX_LABEL_LEN: usize = 80;
 
 /// Random bytes in a handshake token: 256 bits of entropy from the OS CSPRNG.
 const TOKEN_BYTES: usize = 32;
@@ -267,8 +290,13 @@ pub fn default_socket_path() -> PathBuf {
 // --- framing ---------------------------------------------------------------
 
 async fn write_frame<T: Encode + Sync>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
-    let bytes = bincode::encode_to_vec(value, bincode::config::standard())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // Zeroized on drop: a client-side `Authenticate` frame encodes the raw token
+    // into this buffer, so wipe it after it goes on the wire (defense-in-depth;
+    // memory-reading attackers are out of the documented threat model).
+    let bytes = Zeroizing::new(
+        bincode::encode_to_vec(value, bincode::config::standard())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+    );
     let len = u32::try_from(bytes.len()).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large to encode")
     })?;
@@ -765,6 +793,13 @@ impl AgentServer {
                     // Reap finished connections so the set does not grow with churn.
                     while sessions.try_join_next().is_some() {}
                     let Ok((stream, _addr)) = accepted else { continue };
+                    // Refuse (by dropping) new connections past the cap so a local
+                    // peer cannot exhaust fds/tasks/registry entries. Dropping the
+                    // stream closes it; the peer can retry once a slot frees.
+                    if sessions.len() >= MAX_CONNECTIONS {
+                        drop(stream);
+                        continue;
+                    }
                     let peer = read_peer_cred(&stream);
                     let id = register(&self.registry, peer);
                     let registry = Arc::clone(&self.registry);
@@ -817,9 +852,14 @@ fn register(registry: &Mutex<Registry>, peer: PeerCred) -> ConnId {
 
 /// Binds the socket, refusing to clobber a live agent and cleaning up a stale
 /// socket file, then makes it connectable by any peer (`0666`) — the token /
-/// operator-approval gate, not the file mode, is the trust boundary. Placing the
-/// socket in a private directory further limits who can reach it.
+/// operator-approval gate, not the file mode, is the trust boundary.
+///
+/// The socket's *directory* is validated first ([`ensure_parent_dir`]): it must
+/// not be modifiable by other users, so no one else can unlink or replace the
+/// socket. That also closes the race between removing a stale socket and binding
+/// (an attacker who cannot write the directory cannot slip a file into the gap).
 async fn bind(socket_path: &Path) -> Result<UnixListener> {
+    ensure_parent_dir(socket_path)?;
     if socket_path.exists() {
         // If something is actually listening, another agent owns this socket.
         if UnixStream::connect(socket_path).await.is_ok() {
@@ -832,23 +872,74 @@ async fn bind(socket_path: &Path) -> Result<UnixListener> {
         std::fs::remove_file(socket_path)
             .map_err(|e| Error::agent(format!("could not remove stale socket: {e}")))?;
     }
-    ensure_parent_dir(socket_path)?;
     let listener = UnixListener::bind(socket_path)
         .map_err(|e| Error::agent(format!("could not bind {}: {e}", socket_path.display())))?;
     set_socket_permissions(socket_path)?;
     Ok(listener)
 }
 
+/// Ensures the socket's parent directory exists and is safe to place a socket in.
+///
+/// A directory we create is made `0711` (owner-managed, world-*traversable* so
+/// other-UID clients — e.g. containers — can still reach the socket, but not
+/// world-*writable* so they cannot create or delete entries). A directory that
+/// already exists is left untouched but validated: it must be owned by this agent
+/// (or root) and must not be group/other-writable unless the sticky bit protects
+/// it (as on `/tmp`). This refuses the classic hijack where an attacker
+/// pre-creates a predictable, world-writable socket directory.
 #[cfg(unix)]
 fn ensure_parent_dir(socket_path: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
     let Some(parent) = socket_path.parent() else {
         return Ok(());
     };
-    if parent.as_os_str().is_empty() || parent.exists() {
+    if parent.as_os_str().is_empty() {
         return Ok(());
     }
-    std::fs::create_dir_all(parent)
+    if parent.exists() {
+        return check_dir_is_safe(parent);
+    }
+    // `0711`, not `0700`: other UIDs must be able to traverse in to connect.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o711)
+        .create(parent)
         .map_err(|e| Error::agent(format!("could not create {}: {e}", parent.display())))
+}
+
+/// Rejects a socket directory another user could tamper with: not owned by us or
+/// root, or group/other-writable without the sticky bit. Leaves the directory's
+/// permissions unchanged (an operator's deliberately-shared directory is honored,
+/// only validated), so it never locks out already-permitted cross-UID clients.
+#[cfg(unix)]
+fn check_dir_is_safe(parent: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::metadata(parent)
+        .map_err(|e| Error::agent(format!("could not stat {}: {e}", parent.display())))?;
+    // SAFETY: `geteuid` is always successful and has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    let owner = meta.uid();
+    if owner != euid && owner != 0 {
+        return Err(Error::agent(format!(
+            "refusing to use socket directory {}: owned by uid {owner}, not this agent \
+             (uid {euid}) or root — another user could replace the socket",
+            parent.display()
+        )));
+    }
+    let mode = meta.mode();
+    let other_writable = mode & 0o022 != 0; // group- or other-writable
+    let sticky = mode & 0o1000 != 0;
+    if other_writable && !sticky {
+        return Err(Error::agent(format!(
+            "refusing to use socket directory {}: group/other-writable (mode {:o}) without \
+             the sticky bit — another user could replace the socket",
+            parent.display(),
+            mode & 0o7777
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -879,11 +970,27 @@ async fn handle_connection(
     executor: &dyn RequestExecutor,
 ) {
     let mut token_attempts: u32 = 0;
+    let mut awaiting_first_frame = true;
     loop {
-        // A closed connection or a malformed frame just ends this session.
-        let Ok(bytes) = read_frame_bytes(&mut stream, MAX_REQUEST_FRAME).await else {
-            break;
+        // A closed connection or a malformed frame just ends this session. The
+        // first frame is deadlined (see `HANDSHAKE_TIMEOUT`) so a silent peer is
+        // reaped; subsequent reads are untimed so idle clients are undisturbed.
+        // `bytes` is zeroized on drop: an `Authenticate` frame carries the raw
+        // token, and this is the buffer it arrived in.
+        let read = read_frame_bytes(&mut stream, MAX_REQUEST_FRAME);
+        let bytes = if awaiting_first_frame {
+            match tokio::time::timeout(HANDSHAKE_TIMEOUT, read).await {
+                Ok(Ok(bytes)) => bytes,
+                _ => break,
+            }
+        } else {
+            match read.await {
+                Ok(bytes) => bytes,
+                Err(_) => break,
+            }
         };
+        awaiting_first_frame = false;
+        let bytes = Zeroizing::new(bytes);
         let request: AgentRequest = match decode(&bytes) {
             Ok(request) => request,
             Err(_) => break,
@@ -1006,8 +1113,12 @@ fn request_manual(
                 entry.state = ConnState::Pending {
                     requested: requested.min(ceiling),
                 };
-                if label.is_some() {
-                    entry.label = label;
+                if let Some(label) = label {
+                    // The label is attacker-controlled display text; bound and
+                    // sanitize it on ingest so a crafted value cannot flood or
+                    // corrupt the operator's console. Display-side sanitization
+                    // (the CLI) is the second line of defense.
+                    entry.label = Some(sanitize_label(&label));
                 }
                 entry.method = Some(AuthMethod::Manual);
                 AgentResponse::AuthPending
@@ -1016,6 +1127,22 @@ fn request_manual(
     };
     drop(reg);
     response
+}
+
+/// Bounds and sanitizes a client-supplied connection label for operator display:
+/// replaces control characters (which could inject ANSI/CR/newline sequences to
+/// forge or hide console rows) with `·`, and truncates to [`MAX_LABEL_LEN`] on a
+/// char boundary.
+fn sanitize_label(label: &str) -> String {
+    let mut out: String = label
+        .chars()
+        .take(MAX_LABEL_LEN)
+        .map(|c| if c.is_control() { '·' } else { c })
+        .collect();
+    if label.chars().count() > MAX_LABEL_LEN {
+        out.push('…');
+    }
+    out
 }
 
 async fn execute_forwarded(
@@ -1058,6 +1185,59 @@ async fn execute_forwarded(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_dir_is_safe_accepts_owner_managed_and_traversable_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o700, 0o711, 0o755] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                check_dir_is_safe(dir.path()).is_ok(),
+                "mode {mode:o} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn check_dir_is_safe_rejects_world_writable_without_sticky() {
+        use std::os::unix::fs::PermissionsExt;
+        // Group- or other-writable, no sticky bit: another user could swap the socket.
+        for mode in [0o777, 0o733, 0o770] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                check_dir_is_safe(dir.path()).is_err(),
+                "mode {mode:o} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn check_dir_is_safe_accepts_sticky_world_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        // Like `/tmp`: world-writable but sticky, so others cannot unlink our socket.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(check_dir_is_safe(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn sanitize_label_strips_control_chars_and_truncates() {
+        // Control characters (CR, ESC, newline) become `·` so they cannot forge
+        // or hide operator-console rows.
+        assert_eq!(
+            sanitize_label("collector\r\x1b[2Kmalicious"),
+            "collector··[2Kmalicious"
+        );
+        // Plain labels pass through unchanged.
+        assert_eq!(sanitize_label("revolutx-collector"), "revolutx-collector");
+        // Over-long labels are bounded and marked with an ellipsis.
+        let long = "x".repeat(MAX_LABEL_LEN + 40);
+        let out = sanitize_label(&long);
+        assert_eq!(out.chars().count(), MAX_LABEL_LEN + 1);
+        assert!(out.ends_with('…'));
+    }
 
     /// A stub executor that echoes the request path back as the response body, so a
     /// round-trip proves the request crossed the socket intact.

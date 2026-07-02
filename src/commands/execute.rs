@@ -2,10 +2,11 @@
 
 use crate::RevolutXClient;
 use crate::Side;
-use crate::error::Result;
-use crate::model::orders::OrderAck;
+use crate::error::{Error, Result};
+use crate::model::common::{Price, Quantity};
+use crate::model::orders::{ExecutionInstruction, OrderAck, OrderReplacementRequest};
 
-use super::command::{Command, PlaceLimit, PlaceMarket};
+use super::command::{Command, PlaceLimit, PlaceMarket, ReplaceOrder};
 use super::output::{CancelAck, CancelAllAck, CommandOutput};
 
 /// Runs `command` against `client`, returning its structured result.
@@ -67,7 +68,8 @@ pub async fn execute(client: &RevolutXClient, command: Command) -> Result<Comman
         Command::PlaceMarket(order) => {
             CommandOutput::Ack(Box::new(place_market(client, order).await?))
         }
-        Command::Replace { id, request } => {
+        Command::Replace(order) => {
+            let (id, request) = build_replacement(order)?;
             CommandOutput::Ack(Box::new(client.orders().replace(&id, &request).await?))
         }
         Command::Cancel(id) => {
@@ -104,6 +106,39 @@ async fn place_limit(client: &RevolutXClient, order: PlaceLimit) -> Result<Order
         builder = builder.client_order_id(id);
     }
     builder.send().await
+}
+
+/// Assembles a validated [`OrderReplacementRequest`] from a [`ReplaceOrder`],
+/// enforcing "at least one of size/price" — the single place any surface's
+/// replace command is turned into a request (the CLI and MCP only parse input).
+fn build_replacement(order: ReplaceOrder) -> Result<(crate::OrderId, OrderReplacementRequest)> {
+    let ReplaceOrder {
+        id,
+        size,
+        price,
+        in_quote,
+        post_only,
+        client_order_id,
+    } = order;
+    let (base_size, quote_size) = match (size, in_quote) {
+        (Some(amount), false) => (Some(Quantity::new(amount)?), None),
+        (Some(amount), true) => (None, Some(Quantity::new(amount)?)),
+        (None, _) => (None, None),
+    };
+    let price = price.map(Price::new).transpose()?;
+    if base_size.is_none() && quote_size.is_none() && price.is_none() {
+        return Err(Error::invalid_request(
+            "replace needs at least one of size or price",
+        ));
+    }
+    let request = OrderReplacementRequest {
+        client_order_id: client_order_id.unwrap_or_default(),
+        base_size,
+        quote_size,
+        price,
+        execution_instructions: post_only.then(|| vec![ExecutionInstruction::PostOnly]),
+    };
+    Ok((id, request))
 }
 
 async fn place_market(client: &RevolutXClient, order: PlaceMarket) -> Result<OrderAck> {

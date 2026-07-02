@@ -15,17 +15,31 @@ it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
   `authenticate` completes once approved (the pending connection is reused, so it stays
   one console entry). An optional `access` argument sets the requested tier (default
   `view`).
+- `replace_order` tool — atomically replace a resting order's size and/or price (the
+  `Command::Replace` operation the CLI already exposed had no MCP surface). A test now
+  asserts every `Command` variant maps to a catalog tool.
 
 ### Changed
 
 - Builds on `revolutx` 0.5; the `token` argument to `authenticate` is now optional (the
   token path itself is unchanged). The agent it connects to is now persistent and
   multi-client, so it no longer exits the moment the MCP disconnects.
+- `initialize` negotiates the protocol version (honors a supported request, else answers
+  with the server's own) instead of echoing whatever the client sent.
 
 ### Fixed
 
 - Reads larger agent responses (up to 8 MiB) and fails fast on a broken agent connection
   instead of reading misframed data.
+- Order `size`/`price` given as a **fractional JSON number** are rejected (they would
+  round-trip through `f64` and silently corrupt the order); send decimals as strings.
+  Integer JSON numbers are still accepted.
+- Optional tool arguments that are present but wrong-typed (e.g. `limit` as a string,
+  a numeric `cursor`, `symbols` not an array of strings) are now rejected with a clear
+  error instead of being silently dropped; an unknown `access` tier or non-string
+  `token` on `authenticate` is likewise rejected rather than silently downgraded.
+- The stdin reader now caps a single JSON-RPC line at 4 MiB, so a newline-less flood
+  can no longer grow the buffer without bound and OOM the process.
 
 ## [0.2.0] - 2026-06-28
 

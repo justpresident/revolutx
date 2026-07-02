@@ -12,6 +12,10 @@ use rustyline::{Context, Helper};
 
 use crate::args::Cli;
 
+/// Top-level commands the interactive shell refuses (handled only one-shot), kept
+/// out of completion so the shell doesn't suggest what it will reject.
+const NOT_IN_SHELL: [&str; 3] = ["vault", "agent", "cli"];
+
 /// Completes commands (from the clap grammar) and trading symbols (fetched once
 /// at REPL start).
 pub struct ReplHelper {
@@ -28,9 +32,11 @@ impl ReplHelper {
     fn candidates(&self, prior: &[&str], word: &str) -> Vec<String> {
         let cli = Cli::command();
 
-        // First word: a top-level command (or a shell built-in).
+        // First word: a top-level command (or a shell built-in). `vault`, `agent`,
+        // and `cli` are not available inside the shell, so don't offer them.
         let Some((head, rest)) = prior.split_first() else {
             let mut names = subcommand_names(&cli);
+            names.retain(|n| !NOT_IN_SHELL.contains(&n.as_str()));
             names.extend(["help".to_owned(), "exit".to_owned(), "quit".to_owned()]);
             return names;
         };

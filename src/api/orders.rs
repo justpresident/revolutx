@@ -8,9 +8,10 @@
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
+use crate::api::comma_joined;
 use crate::client::RevolutXClient;
 use crate::error::{Error, Result};
-use crate::model::common::{ClientOrderId, OrderId, Price, Quantity, Side, Symbol};
+use crate::model::common::{ClientOrderId, OrderId, Price, Quantity, Side, Symbol, dash_symbol};
 use crate::model::orders::{
     ExecutionInstruction, LimitOrderConfiguration, MarketOrderConfiguration, Order, OrderAck,
     OrderConfiguration, OrderDetails, OrderPlacementRequest, OrderReplacementRequest, OrderStatus,
@@ -38,17 +39,17 @@ pub struct ActiveOrdersQuery {
 }
 
 impl ActiveOrdersQuery {
-    fn to_query(&self) -> Vec<(String, String)> {
-        let mut query = Vec::new();
-        for symbol in &self.symbols {
-            query.push(("symbols".into(), symbol.clone()));
-        }
-        for state in &self.order_states {
-            query.push(("order_states".into(), state.as_str().to_string()));
-        }
-        for order_type in &self.order_types {
-            query.push(("order_types".into(), order_type.as_str().to_string()));
-        }
+    fn to_query(&self) -> Result<Vec<(String, String)>> {
+        reject_unknown_filters(&self.order_states, &self.order_types)?;
+        let mut query = comma_joined("symbols", self.symbols.iter().map(|s| dash_symbol(s)));
+        query.extend(comma_joined(
+            "order_states",
+            self.order_states.iter().map(|s| s.as_str()),
+        ));
+        query.extend(comma_joined(
+            "order_types",
+            self.order_types.iter().map(|t| t.as_str()),
+        ));
         if let Some(side) = self.side {
             query.push(("side".into(), side.as_str().to_string()));
         }
@@ -58,8 +59,79 @@ impl ActiveOrdersQuery {
         if let Some(limit) = self.limit {
             query.push(("limit".into(), limit.to_string()));
         }
-        query
+        Ok(query)
     }
+}
+
+/// Validates a raw [`OrderConfiguration`]: exactly one of `limit`/`market`, and
+/// within the chosen one exactly one of `base_size`/`quote_size`. The placement
+/// builders guarantee this by construction; [`OrdersApi::place`] applies it to
+/// requests assembled by hand so they fail locally rather than at the exchange.
+fn validate_placement(config: &OrderConfiguration) -> Result<()> {
+    match (&config.limit, &config.market) {
+        (Some(_), Some(_)) => Err(Error::invalid_request(
+            "order configuration must set exactly one of `limit` or `market`, not both",
+        )),
+        (None, None) => Err(Error::invalid_request(
+            "order configuration must set one of `limit` or `market`",
+        )),
+        (Some(limit), None) => {
+            validate_one_size(limit.base_size.is_some(), limit.quote_size.is_some())
+        }
+        (None, Some(market)) => {
+            validate_one_size(market.base_size.is_some(), market.quote_size.is_some())
+        }
+    }
+}
+
+/// Enforces "exactly one of `base_size` / `quote_size`" for an order configuration.
+fn validate_one_size(has_base: bool, has_quote: bool) -> Result<()> {
+    if has_base == has_quote {
+        return Err(Error::invalid_request(
+            "order configuration must set exactly one of `base_size` or `quote_size`",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a placement symbol and normalizes it to the dash form the exchange
+/// accepts, so a slash-form pairs-map key placed as an order still reaches the
+/// wire correctly.
+fn build_symbol(raw: &str) -> Result<Symbol> {
+    Symbol::new(dash_symbol(raw).into_owned())
+}
+
+/// Rejects the `Unknown` execution instruction (only ever produced by reading an
+/// unrecognized server value; never valid to send).
+fn checked_instructions(
+    instructions: Option<Vec<ExecutionInstruction>>,
+) -> Result<Option<Vec<ExecutionInstruction>>> {
+    if let Some(list) = &instructions
+        && list.contains(&ExecutionInstruction::Unknown)
+    {
+        return Err(Error::invalid_request(
+            "cannot send an unknown execution instruction",
+        ));
+    }
+    Ok(instructions)
+}
+
+/// Rejects `Unknown` forward-compatibility variants in order filters: they are
+/// only ever produced by *reading* an unrecognized server value, so sending the
+/// literal `unknown` token as a filter is a caller mistake that the exchange
+/// would answer with an opaque 400. Fail locally with a clear message instead.
+fn reject_unknown_filters(states: &[OrderStatus], types: &[OrderType]) -> Result<()> {
+    if states.contains(&OrderStatus::Unknown) {
+        return Err(Error::invalid_request(
+            "cannot filter orders by an unknown order state",
+        ));
+    }
+    if types.contains(&OrderType::Unknown) {
+        return Err(Error::invalid_request(
+            "cannot filter orders by an unknown order type",
+        ));
+    }
+    Ok(())
 }
 
 /// Filters for `GET /orders/historical`. Timestamps are Unix epoch
@@ -84,17 +156,17 @@ pub struct HistoricalOrdersQuery {
 }
 
 impl HistoricalOrdersQuery {
-    fn to_query(&self) -> Vec<(String, String)> {
-        let mut query = Vec::new();
-        for symbol in &self.symbols {
-            query.push(("symbols".into(), symbol.clone()));
-        }
-        for state in &self.order_states {
-            query.push(("order_states".into(), state.as_str().to_string()));
-        }
-        for order_type in &self.order_types {
-            query.push(("order_types".into(), order_type.as_str().to_string()));
-        }
+    fn to_query(&self) -> Result<Vec<(String, String)>> {
+        reject_unknown_filters(&self.order_states, &self.order_types)?;
+        let mut query = comma_joined("symbols", self.symbols.iter().map(|s| dash_symbol(s)));
+        query.extend(comma_joined(
+            "order_states",
+            self.order_states.iter().map(|s| s.as_str()),
+        ));
+        query.extend(comma_joined(
+            "order_types",
+            self.order_types.iter().map(|t| t.as_str()),
+        ));
         if let Some(start) = self.start_date {
             query.push(("start_date".into(), start.to_string()));
         }
@@ -107,7 +179,7 @@ impl HistoricalOrdersQuery {
         if let Some(limit) = self.limit {
             query.push(("limit".into(), limit.to_string()));
         }
-        query
+        Ok(query)
     }
 }
 
@@ -217,7 +289,13 @@ impl<'a> OrdersApi<'a> {
     // --- Management ---------------------------------------------------------
 
     /// `POST /orders` — places a fully-constructed order request.
+    ///
+    /// The placement builders (`limit_buy`, `market_sell`, …) are the preferred,
+    /// invariant-preserving entry points; this raw form is validated too, so a
+    /// hand-built request with no configuration, both `limit` and `market`, or
+    /// both size fields fails locally rather than with an opaque exchange 400.
     pub async fn place(&self, request: &OrderPlacementRequest) -> Result<OrderAck> {
+        validate_placement(&request.order_configuration)?;
         let raw: RawAck = self
             .client
             .send_json(RequestSpec::post_json("/orders", request)?)
@@ -250,7 +328,7 @@ impl<'a> OrdersApi<'a> {
     pub async fn active(&self, query: &ActiveOrdersQuery) -> Result<Page<Order>> {
         let raw: RawPage<Order> = self
             .client
-            .send_json(RequestSpec::get("/orders/active").with_query(query.to_query()))
+            .send_json(RequestSpec::get("/orders/active").with_query(query.to_query()?))
             .await?;
         Ok(raw.into())
     }
@@ -259,7 +337,7 @@ impl<'a> OrdersApi<'a> {
     pub async fn historical(&self, query: &HistoricalOrdersQuery) -> Result<Page<Order>> {
         let raw: RawPage<Order> = self
             .client
-            .send_json(RequestSpec::get("/orders/historical").with_query(query.to_query()))
+            .send_json(RequestSpec::get("/orders/historical").with_query(query.to_query()?))
             .await?;
         Ok(raw.into())
     }
@@ -361,9 +439,10 @@ impl<'a> LimitOrderBuilder<'a> {
 
     /// Builds the validated request without sending it.
     pub fn build(self) -> Result<OrderPlacementRequest> {
-        let symbol = Symbol::new(self.symbol)?;
+        let symbol = build_symbol(&self.symbol)?;
         let price = Price::new(self.price)?;
         let size = Quantity::new(self.size)?;
+        let execution_instructions = checked_instructions(self.execution_instructions)?;
         let (base_size, quote_size) = match self.size_kind {
             SizeKind::Base => (Some(size), None),
             SizeKind::Quote => (None, Some(size)),
@@ -377,7 +456,7 @@ impl<'a> LimitOrderBuilder<'a> {
                     base_size,
                     quote_size,
                     price,
-                    execution_instructions: self.execution_instructions,
+                    execution_instructions,
                 }),
                 market: None,
             },
@@ -434,7 +513,7 @@ impl<'a> MarketOrderBuilder<'a> {
 
     /// Builds the validated request without sending it.
     pub fn build(self) -> Result<OrderPlacementRequest> {
-        let symbol = Symbol::new(self.symbol)?;
+        let symbol = build_symbol(&self.symbol)?;
         let size = Quantity::new(self.size)?;
         let (base_size, quote_size) = match self.size_kind {
             SizeKind::Base => (Some(size), None),

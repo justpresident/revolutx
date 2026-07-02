@@ -86,6 +86,19 @@ impl fmt::Display for Symbol {
     }
 }
 
+/// Returns `symbol` in the dash form (`BTC-USD`) the exchange uses in request
+/// paths and array query filters, converting the slash form (`BTC/USD`) — the
+/// shape some responses and the pairs-map key use — without allocating when it
+/// is already dashed. The endpoint layer applies this so a symbol taken straight
+/// from `configuration().pairs()` reaches the wire in the accepted form.
+pub(crate) fn dash_symbol(symbol: &str) -> Cow<'_, str> {
+    if symbol.contains('/') {
+        Cow::Owned(symbol.replace('/', "-"))
+    } else {
+        Cow::Borrowed(symbol)
+    }
+}
+
 impl FromStr for Symbol {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
@@ -134,9 +147,23 @@ impl Side {
     }
 }
 
+impl FromStr for Side {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "buy" => Ok(Self::Buy),
+            "sell" => Ok(Self::Sell),
+            other => Err(Error::invalid_request(format!(
+                "invalid side '{other}' (expected 'buy' or 'sell')"
+            ))),
+        }
+    }
+}
+
 impl fmt::Display for Side {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        // `pad` (not `write_str`) so table widths like `{:<5}` align buy/sell rows.
+        f.pad(self.as_str())
     }
 }
 
@@ -162,7 +189,8 @@ impl OrderId {
 
 impl fmt::Display for OrderId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        // `pad` (not `write_str`) so column widths apply when ids are tabulated.
+        f.pad(&self.0)
     }
 }
 
@@ -212,7 +240,8 @@ impl ClientOrderId {
 
 impl fmt::Display for ClientOrderId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        // `pad` (not `write!`) so column widths apply when ids are tabulated.
+        f.pad(&self.0.to_string())
     }
 }
 
@@ -373,8 +402,9 @@ impl From<OffsetDateTime> for Timestamp {
 
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `pad` (not `write_str`) so column widths apply when timestamps are tabulated.
         match self.0.format(&Rfc3339) {
-            Ok(s) => f.write_str(&s),
+            Ok(s) => f.pad(&s),
             Err(_) => write!(f, "{}", self.unix_millis()),
         }
     }

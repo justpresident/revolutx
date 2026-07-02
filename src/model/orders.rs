@@ -114,6 +114,10 @@ pub enum TriggerType {
     Market,
     /// Trigger produces a limit order.
     Limit,
+    /// A value this SDK version does not recognize (forward compatibility) — so
+    /// one exotic trigger does not fail deserialization of a whole orders page.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The price-comparison operator that activates a trigger.
@@ -124,6 +128,10 @@ pub enum TriggerDirection {
     Ge,
     /// Activate when the market price is less than or equal to the trigger.
     Le,
+    /// A value this SDK version does not recognize (forward compatibility) — so
+    /// one exotic trigger does not fail deserialization of a whole orders page.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Trigger conditions for conditional and take-profit / stop-loss orders.

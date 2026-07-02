@@ -14,6 +14,7 @@
 //! `enable_ptrace_protection` fork) and before the async runtime starts — forking a
 //! multithreaded process is undefined behavior.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,10 +23,23 @@ use revolutx::AccessLevel;
 use revolutx::agent::{
     AgentControl, AgentServer, AuthMethod, AuthToken, ConnState, default_socket_path,
 };
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::Validator;
+use rustyline::{Context, Editor, Helper};
 use tokio::sync::Notify;
 
 use crate::args::{AgentCmd, GlobalOpts};
 use crate::creds;
+
+/// Operator-console command names offered by completion (aliases like `ls`/`?`
+/// still work but are not suggested).
+const CONSOLE_COMMANDS: [&str; 5] = ["list", "grant", "deny", "help", "quit"];
+/// Access tiers completed after `grant <id>`.
+const CONSOLE_TIERS: [&str; 3] = ["market", "view", "trading"];
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -127,15 +141,69 @@ fn print_token(token: &str) {
 
 // --- operator console ------------------------------------------------------
 
-/// Spawns the console thread. It reads commands from stdin and drives `control`; on
-/// EOF it simply stops reading (the agent keeps serving).
+/// Spawns the console thread. It reads commands from stdin and drives `control`.
 fn spawn_console(control: AgentControl) {
     let _ = std::thread::Builder::new()
         .name("revolutx-agent-console".to_owned())
         .spawn(move || console_loop(&control));
 }
 
+/// Drives the operator console. An interactive terminal gets a line editor
+/// (a `> ` prompt, session history, and command/id/tier completion); a piped or
+/// redirected stdin falls back to plain line reading.
 fn console_loop(control: &AgentControl) {
+    if std::io::stdin().is_terminal() {
+        interactive_console(control);
+    } else {
+        plain_console(control);
+    }
+}
+
+/// Interactive console: a `rustyline` line editor with a `> ` prompt, in-memory
+/// (session-only, never persisted to disk) history, and completion.
+fn interactive_console(control: &AgentControl) {
+    let mut editor = match Editor::<ConsoleHelper, DefaultHistory>::new() {
+        Ok(editor) => editor,
+        Err(e) => {
+            eprintln!("revolutx-agent: line editor unavailable ({e}); reading plainly");
+            plain_console(control);
+            return;
+        }
+    };
+    editor.set_helper(Some(ConsoleHelper {
+        control: control.clone(),
+    }));
+    loop {
+        match editor.readline("> ") {
+            Ok(line) => {
+                let input = line.trim();
+                if input.is_empty() {
+                    continue;
+                }
+                // Session-only history: kept in memory for this run, not written
+                // to disk (a secure history store is planned separately).
+                let _ = editor.add_history_entry(input);
+                if handle_command(control, input) {
+                    return; // `quit` requested; the server is stopping.
+                }
+            }
+            // In raw mode rustyline receives Ctrl-C as a keystroke, not a process
+            // SIGINT, so drive the graceful shutdown here (mirroring the signal
+            // path in `start`).
+            Err(ReadlineError::Interrupted) => {
+                control.shutdown();
+                return;
+            }
+            // Ctrl-D (Eof) or a read error closes the console but leaves the agent
+            // serving, matching the piped-stdin (EOF) behavior below.
+            Err(_) => return,
+        }
+    }
+}
+
+/// Plain console for a non-interactive stdin (piped/redirected): read lines until
+/// EOF, which stops reading but leaves the agent serving.
+fn plain_console(control: &AgentControl) {
     let stdin = std::io::stdin();
     let mut line = String::new();
     loop {
@@ -149,6 +217,61 @@ fn console_loop(control: &AgentControl) {
         }
     }
 }
+
+/// Completion for the operator console: command names first, then live connection
+/// ids for `grant`/`deny`, then access tiers for `grant <id> <tier>`.
+struct ConsoleHelper {
+    control: AgentControl,
+}
+
+impl Completer for ConsoleHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let head = &line[..pos];
+        let word_start = head.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+        let word = &head[word_start..];
+        let prior: Vec<&str> = head[..word_start].split_whitespace().collect();
+
+        let candidates: Vec<String> = match prior.first().copied() {
+            // First word: a console command.
+            None => CONSOLE_COMMANDS.iter().map(|s| (*s).to_owned()).collect(),
+            // `grant <id>` / `deny <id>`: offer the live connection ids.
+            Some("grant" | "deny") if prior.len() == 1 => self
+                .control
+                .list()
+                .iter()
+                .map(|c| c.id.to_string())
+                .collect(),
+            // `grant <id> <tier>`: offer the access tiers.
+            Some("grant") if prior.len() == 2 => {
+                CONSOLE_TIERS.iter().map(|s| (*s).to_owned()).collect()
+            }
+            _ => Vec::new(),
+        };
+        let pairs = candidates
+            .into_iter()
+            .filter(|c| c.starts_with(word))
+            .map(|c| Pair {
+                display: c.clone(),
+                replacement: c,
+            })
+            .collect();
+        Ok((word_start, pairs))
+    }
+}
+
+impl Hinter for ConsoleHelper {
+    type Hint = String;
+}
+impl Highlighter for ConsoleHelper {}
+impl Validator for ConsoleHelper {}
+impl Helper for ConsoleHelper {}
 
 /// Handles one console command. Returns `true` if the agent should quit.
 fn handle_command(control: &AgentControl, input: &str) -> bool {
@@ -192,18 +315,9 @@ fn parse_grant<'a>(
         .map_err(|_| "id must be a number".to_owned())?;
     let access = match parts.next() {
         None => None,
-        Some(s) => Some(parse_access(s).ok_or_else(|| format!("unknown tier `{s}`"))?),
+        Some(s) => Some(s.parse::<AccessLevel>().map_err(|e| e.to_string())?),
     };
     Ok((id, access))
-}
-
-fn parse_access(s: &str) -> Option<AccessLevel> {
-    match s {
-        "market" => Some(AccessLevel::Market),
-        "view" => Some(AccessLevel::View),
-        "trading" => Some(AccessLevel::Trading),
-        _ => None,
-    }
 }
 
 fn print_connections(control: &AgentControl) {
@@ -213,24 +327,63 @@ fn print_connections(control: &AgentControl) {
         return;
     }
     println!(
-        "{:>3}  {:>6} {:>6} {:>7}  {:<7}  {:<20}  LABEL",
-        "ID", "UID", "GID", "PID", "METHOD", "STATE"
+        "{:>3}  {:>6} {:>6} {:>7}  {:<15}  {:<7}  {:<20}  LABEL",
+        "ID", "UID", "GID", "PID", "NAME", "METHOD", "STATE"
     );
     for c in conns {
         let pid = c.peer.pid.map_or_else(|| "-".to_owned(), |p| p.to_string());
+        let name = process_name(c.peer.pid);
         let method = c.method.map_or("-", AuthMethod::as_str);
-        let label = c.label.as_deref().unwrap_or("-");
+        // Sanitize the client-supplied label at the point it reaches the terminal
+        // (the agent also bounds/sanitizes it on ingest): replace control
+        // characters so a crafted label cannot inject ANSI/CR/newline sequences to
+        // forge or hide console rows the operator relies on when granting.
+        let label = c
+            .label
+            .as_deref()
+            .map_or_else(|| "-".to_owned(), display_label);
         println!(
-            "{:>3}  {:>6} {:>6} {:>7}  {:<7}  {:<20}  {}",
+            "{:>3}  {:>6} {:>6} {:>7}  {:<15}  {:<7}  {:<20}  {}",
             c.id,
             c.peer.uid,
             c.peer.gid,
             pid,
+            name,
             method,
             state_str(c.state),
             label
         );
     }
+}
+
+/// Best-effort process name for `pid`, read from `/proc/<pid>/comm` (Linux). The
+/// pid is the peer captured at connect; for a live connection it is the connecting
+/// process. Returns `-` when unavailable (no pid, process gone, or non-Linux), and
+/// sanitizes the value like a label since it comes from another process.
+fn process_name(pid: Option<i32>) -> String {
+    let Some(pid) = pid else {
+        return "-".to_owned();
+    };
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).map_or_else(
+        |_| "-".to_owned(),
+        |name| {
+            let name = name.trim();
+            if name.is_empty() {
+                "-".to_owned()
+            } else {
+                display_label(name)
+            }
+        },
+    )
+}
+
+/// Renders a connection label safe for the operator's terminal: control
+/// characters become `·`.
+fn display_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|ch| if ch.is_control() { '·' } else { ch })
+        .collect()
 }
 
 fn state_str(state: ConnState) -> String {

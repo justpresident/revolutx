@@ -27,12 +27,32 @@ console.
   *authorized* client has been connected for the timeout.
 - The socket is world-connectable and cross-UID clients are allowed and evaluated by
   the operator (their uid/gid/pid are shown) — the same-UID requirement is dropped.
+- The `agent` operator console gains a `> ` prompt, session (in-memory, never
+  persisted) history, and completion (commands, then live connection ids for
+  `grant`/`deny`, then tiers for `grant <id>`). A piped/redirected stdin falls back to
+  plain line reading. `list` also shows each peer's process **NAME** (from
+  `/proc/<pid>/comm`). Connection labels are sanitized before printing (control
+  characters shown as `·`), so a crafted label cannot inject terminal escape sequences.
+- REPL completion no longer offers the shell-unavailable `vault`/`agent`/`cli`
+  commands; the `market watch` poll loop is shared with the one-shot path. REPL history
+  remains in-memory for the session only (not persisted to disk).
 
 ### Fixed
 
 - `agent start` refuses an oversized forwarded response gracefully instead of
   desynchronizing the client's connection, and handles larger (up to 8 MiB) market-data
   responses.
+- `balances` shows a **STAKED** column, so AVAILABLE + RESERVED + STAKED reconciles to
+  TOTAL; staked funds were previously invisible outside `--json`.
+- `orders limit`/`market` decimal errors name the offending field (`size` vs `price`).
+- The REPL accepts `--json` after the command (`balances --json`), not only before it.
+- Bare epoch integers in date flags are auto-detected as seconds or milliseconds by
+  magnitude (a pasted seconds value is no longer read as 1970), and RFC 3339 sub-second
+  precision is preserved.
+- `market watch` stops on **Enter** — the reliable signal under the SIGINT hardening the
+  command runs with (the previous Ctrl-C handler was unreachable).
+- With `--insecure-env`, `REVOLUTX_ENVIRONMENT` now takes effect when `--env` is not
+  passed (the flag default previously always overrode it).
 
 ## [0.2.1] - 2026-06-30
 

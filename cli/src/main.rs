@@ -35,6 +35,7 @@ mod line;
 mod oneshot;
 mod progress;
 mod repl;
+mod watch;
 
 use std::process::ExitCode;
 

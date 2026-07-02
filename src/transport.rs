@@ -207,13 +207,26 @@ impl LocalExecutor {
         url.set_query(if query.is_empty() { None } else { Some(&query) });
 
         // Our pre-encoding must survive `url` normalization unchanged, so the
-        // bytes we signed are exactly the bytes on the wire.
-        debug_assert_eq!(url.path(), full_path, "path changed during URL assembly");
-        debug_assert_eq!(
-            url.query().unwrap_or(""),
-            query,
-            "query changed during URL assembly"
-        );
+        // bytes we signed are exactly the bytes on the wire. A path parameter
+        // that changes under URL normalization — e.g. a `.`/`..` segment from a
+        // malformed order id or symbol — would otherwise sign one path and send
+        // another (a wrong-path request the exchange rejects, and, behind the
+        // agent, a request whose access tier was classified from the pre-
+        // normalization path). Refuse it here instead of relying on a
+        // `debug_assert` compiled out of release builds.
+        if url.path() != full_path {
+            return Err(Error::invalid_request(format!(
+                "request path '{full_path}' is not URL-safe (it normalizes to '{}'); \
+                 check the symbol or order id for '.'/'..' path segments",
+                url.path()
+            )));
+        }
+        if url.query().unwrap_or("") != query {
+            return Err(Error::invalid_request(format!(
+                "request query '{query}' is not URL-safe (it normalizes to '{}')",
+                url.query().unwrap_or("")
+            )));
+        }
 
         let mut request = self.http.request(spec.method.clone(), url);
 
@@ -276,11 +289,17 @@ impl std::fmt::Debug for LocalExecutor {
 
 /// Percent-encodes a single path or query component, encoding every byte that
 /// is not an RFC 3986 unreserved character. Reused for path parameters.
+///
+/// The comma is left literal: the exchange's array query parameters use the
+/// `form`/`explode=false` style (`symbols=BTC-USD,ETH-USD`), where the comma is
+/// a sub-delimiter, not data. No other component the SDK builds (symbols, order
+/// ids, base64 cursors) contains a comma, so this only affects those joined
+/// lists.
 pub(crate) fn encode_component(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for &b in input.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b',' => {
                 out.push(b as char);
             }
             _ => {
@@ -337,6 +356,9 @@ mod tests {
         assert_eq!(encode_component("a+b/c=d"), "a%2Bb%2Fc%3Dd");
         assert_eq!(encode_component("BTC-USD"), "BTC-USD");
         assert_eq!(encode_component("BTC/USD"), "BTC%2FUSD");
+        // The comma is left literal: it is the delimiter of the exchange's
+        // `form`/`explode=false` array parameters, not data.
+        assert_eq!(encode_component("BTC-USD,ETH-USD"), "BTC-USD,ETH-USD");
     }
 
     #[test]

@@ -14,8 +14,13 @@ use crate::protocol::{
 };
 use crate::tools;
 
-/// MCP protocol version advertised when the client does not request one.
+/// MCP protocol version advertised when the client does not request one (the
+/// server's preferred revision).
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
+/// Protocol revisions this server actually implements. A client asking for one of
+/// these gets it back; anything else is answered with [`DEFAULT_PROTOCOL_VERSION`]
+/// so the client can decide, rather than blindly echoing an unsupported version.
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 1] = [DEFAULT_PROTOCOL_VERSION];
 const SERVER_NAME: &str = "revolutx-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -127,11 +132,13 @@ impl Server {
     }
 
     fn initialize_result(params: &Value) -> Value {
-        // Echo the client's requested protocol version when present.
-        let protocol_version = params
-            .get("protocolVersion")
-            .and_then(Value::as_str)
-            .unwrap_or(DEFAULT_PROTOCOL_VERSION);
+        // Negotiate: honor the client's requested version only if we actually
+        // implement it; otherwise answer with our preferred version and let the
+        // client decide, rather than echoing a version we don't speak.
+        let protocol_version = match params.get("protocolVersion").and_then(Value::as_str) {
+            Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v,
+            _ => DEFAULT_PROTOCOL_VERSION,
+        };
 
         json!({
             "protocolVersion": protocol_version,
@@ -185,16 +192,26 @@ impl Server {
     /// restarted independently of the MCP. On success every other tool becomes usable,
     /// subject to the agent's per-connection access policy.
     async fn authenticate(&self, id: Value, args: &Value) -> Value {
-        match args
-            .get(tools::ARG_TOKEN)
-            .and_then(Value::as_str)
-            .filter(|t| !t.trim().is_empty())
-        {
-            Some(token) => self.authenticate_with_token(id, token).await,
-            None => {
-                self.authenticate_interactively(id, requested_access(args))
-                    .await
+        // A present-but-non-string token is a caller mistake, not a request for
+        // interactive auth — surface it rather than silently switching modes.
+        match args.get(tools::ARG_TOKEN) {
+            Some(Value::String(t)) if !t.trim().is_empty() => {
+                return self.authenticate_with_token(id, t).await;
             }
+            None | Some(Value::Null | Value::String(_)) => {} // absent/empty → interactive
+            Some(_) => {
+                return success(
+                    id,
+                    tool_content(
+                        "argument 'token' must be a string; omit it to request interactive approval",
+                        true,
+                    ),
+                );
+            }
+        }
+        match requested_access(args) {
+            Ok(requested) => self.authenticate_interactively(id, requested).await,
+            Err(message) => success(id, tool_content(message, true)),
         }
     }
 
@@ -302,13 +319,16 @@ impl Server {
     }
 }
 
-/// The access tier an interactive `authenticate` requests (default view).
-fn requested_access(args: &Value) -> AccessLevel {
-    match args.get(tools::ARG_ACCESS).and_then(Value::as_str) {
-        Some("market") => AccessLevel::Market,
-        Some("trading") => AccessLevel::Trading,
-        Some("view") => AccessLevel::View,
-        _ => DEFAULT_REQUEST_ACCESS,
+/// The access tier an interactive `authenticate` requests (default view). An
+/// unrecognized or non-string tier is an error, not a silent downgrade to the
+/// default.
+fn requested_access(args: &Value) -> Result<AccessLevel, String> {
+    match args.get(tools::ARG_ACCESS) {
+        None | Some(Value::Null) => Ok(DEFAULT_REQUEST_ACCESS),
+        Some(Value::String(s)) => s.parse::<AccessLevel>().map_err(|e| e.to_string()),
+        Some(_) => {
+            Err("argument 'access' must be a string tier (market, view, or trading)".to_owned())
+        }
     }
 }
 
@@ -403,21 +423,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialize_echoes_version_and_advertises_tools() {
+    async fn initialize_negotiates_version_and_advertises_tools() {
         let server = public_server();
+
+        // A supported version is honored.
         let resp = handle(
             &server,
             json!({
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } }
+                "params": { "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } }
             }),
         )
         .await
         .unwrap();
-
-        assert_eq!(resp["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
         assert_eq!(resp["result"]["serverInfo"]["name"], "revolutx-mcp");
         assert!(resp["result"]["capabilities"]["tools"].is_object());
+
+        // An unsupported version is answered with the server's own, not echoed.
+        let resp = handle(
+            &server,
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "initialize",
+                "params": { "protocolVersion": "1999-01-01", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
     }
 
     #[tokio::test]

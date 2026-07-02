@@ -19,9 +19,10 @@ pub struct GlobalOpts {
     /// Print raw JSON instead of human-readable output.
     #[arg(long, global = true)]
     pub json: bool,
-    /// Target environment.
-    #[arg(long, global = true, value_enum, default_value_t = EnvArg::Production)]
-    pub env: EnvArg,
+    /// Target environment (default: production). With `--insecure-env`, omitting
+    /// this lets `REVOLUTX_ENVIRONMENT` take effect; passing it always wins.
+    #[arg(long, global = true, value_enum)]
+    pub env: Option<EnvArg>,
     /// Path to the encrypted vault (default: `~/.revolutx/vault`).
     #[arg(long, global = true)]
     pub vault: Option<PathBuf>,

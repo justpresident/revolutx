@@ -24,9 +24,25 @@ impl Presenter for HumanPresenter {
         let mut lines: Vec<String> = Vec::new();
         match output {
             CommandOutput::Balances(balances) => {
-                lines.push(row4("CCY", "AVAILABLE", "RESERVED", "TOTAL"));
+                lines.push(balance_row(
+                    "CCY",
+                    "AVAILABLE",
+                    "RESERVED",
+                    "STAKED",
+                    "TOTAL",
+                ));
                 for b in balances {
-                    lines.push(row4(&b.currency, b.available, b.reserved, b.total));
+                    // `total` includes staked funds, so a staked balance is shown
+                    // explicitly — otherwise AVAILABLE + RESERVED would not equal
+                    // TOTAL with no visible reason.
+                    let staked = b.staked.map_or_else(|| "-".to_owned(), |s| s.to_string());
+                    lines.push(balance_row(
+                        &b.currency,
+                        b.available,
+                        b.reserved,
+                        staked,
+                        b.total,
+                    ));
                 }
             }
             CommandOutput::Currencies(currencies) => {
@@ -99,9 +115,10 @@ impl Presenter for HumanPresenter {
             }
             CommandOutput::PrivateTrades(page) => {
                 for f in &page.items {
+                    let side = f.side.map_or("-", revolutx::Side::as_str);
                     lines.push(format!(
                         "{}  {} {} {} @ {} (maker={})",
-                        f.traded_at, f.side, f.quantity, f.asset_id, f.price, f.is_maker
+                        f.traded_at, side, f.quantity, f.asset_id, f.price, f.is_maker
                     ));
                 }
             }
@@ -176,13 +193,14 @@ impl Presenter for HumanPresenter {
     }
 }
 
-fn row4(
-    a: impl std::fmt::Display,
-    b: impl std::fmt::Display,
-    c: impl std::fmt::Display,
-    d: impl std::fmt::Display,
+fn balance_row(
+    ccy: impl std::fmt::Display,
+    available: impl std::fmt::Display,
+    reserved: impl std::fmt::Display,
+    staked: impl std::fmt::Display,
+    total: impl std::fmt::Display,
 ) -> String {
-    format!("{a:<8} {b:>20} {c:>20} {d:>20}")
+    format!("{ccy:<8} {available:>20} {reserved:>20} {staked:>20} {total:>20}")
 }
 
 fn push_levels(lines: &mut Vec<String>, book: &revolutx::model::market_data::OrderBook) {
@@ -201,4 +219,46 @@ fn sorted<V>(map: &std::collections::HashMap<String, V>) -> Vec<(&String, &V)> {
     let mut entries: Vec<_> = map.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     entries
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use revolutx::Decimal;
+    use revolutx::model::balances::Balance;
+    use std::str::FromStr;
+
+    fn dec(s: &str) -> Decimal {
+        Decimal::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn balances_show_staked_and_a_dash_when_absent() {
+        let output = CommandOutput::Balances(vec![
+            Balance {
+                currency: "BTC".into(),
+                available: dec("1.0"),
+                staked: Some(dec("0.5")),
+                reserved: dec("0.2"),
+                total: dec("1.7"),
+            },
+            Balance {
+                currency: "USD".into(),
+                available: dec("100"),
+                staked: None,
+                reserved: dec("0"),
+                total: dec("100"),
+            },
+        ]);
+        let text = render(false, &output).unwrap();
+        assert!(text.contains("STAKED"), "header missing STAKED:\n{text}");
+        assert!(text.contains("0.5"), "staked amount missing:\n{text}");
+        // A currency with no staked funds renders `-`, not a blank cell.
+        let usd = text.lines().find(|l| l.contains("USD")).unwrap();
+        assert!(
+            usd.contains('-'),
+            "expected a dash for no staked funds: {usd}"
+        );
+    }
 }

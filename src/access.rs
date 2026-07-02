@@ -48,6 +48,21 @@ impl AccessLevel {
     }
 }
 
+impl std::str::FromStr for AccessLevel {
+    type Err = crate::error::Error;
+    /// Parses a tier name (`market`, `view`, `trading`), case-insensitively.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "market" => Ok(Self::Market),
+            "view" => Ok(Self::View),
+            "trading" => Ok(Self::Trading),
+            other => Err(crate::error::Error::invalid_request(format!(
+                "invalid access tier '{other}' (expected one of: {ACCESS_LADDER})"
+            ))),
+        }
+    }
+}
+
 /// The capability ladder, lowest to highest — for help text and messages.
 pub const ACCESS_LADDER: &str = "market < view < trading";
 

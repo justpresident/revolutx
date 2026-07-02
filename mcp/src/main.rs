@@ -27,8 +27,15 @@ mod protocol;
 mod server;
 mod tools;
 
+use std::io;
+
 use server::Server;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+/// Upper bound on a single JSON-RPC line (bytes). Generous for any real request,
+/// but caps memory so a newline-less flood on stdin cannot grow the buffer
+/// without limit and OOM the process.
+const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() {
@@ -43,23 +50,24 @@ async fn main() {
          token. The agent connects lazily and may be (re)started independently."
     );
 
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut reader = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
 
     loop {
-        match lines.next_line().await {
+        match read_bounded_line(&mut reader, MAX_LINE_BYTES).await {
             Ok(Some(line)) => {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Some(response) = server.handle_line(&line).await {
-                    if stdout.write_all(response.as_bytes()).await.is_err()
-                        || stdout.write_all(b"\n").await.is_err()
-                        || stdout.flush().await.is_err()
-                    {
-                        eprintln!("revolutx-mcp: stdout closed, exiting");
-                        break;
-                    }
+                let Some(response) = server.handle_line(&line).await else {
+                    continue;
+                };
+                if stdout.write_all(response.as_bytes()).await.is_err()
+                    || stdout.write_all(b"\n").await.is_err()
+                    || stdout.flush().await.is_err()
+                {
+                    eprintln!("revolutx-mcp: stdout closed, exiting");
+                    break;
                 }
             }
             Ok(None) => break, // EOF on stdin: client disconnected.
@@ -68,5 +76,85 @@ async fn main() {
                 break;
             }
         }
+    }
+}
+
+/// Reads one `\n`-terminated line as UTF-8, refusing to buffer more than `max`
+/// bytes before a newline arrives. Unlike `AsyncBufReadExt::lines`, a client that
+/// streams megabytes without a newline is rejected rather than allowed to grow
+/// the buffer unbounded. Returns `Ok(None)` at EOF.
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> io::Result<Option<String>> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            // EOF: return a trailing unterminated line if any, else None.
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        if let Some(newline) = available.iter().position(|&b| b == b'\n') {
+            if buf.len() + newline > max {
+                return Err(oversized_line());
+            }
+            buf.extend_from_slice(&available[..newline]);
+            reader.consume(newline + 1);
+            break;
+        }
+        let taken = available.len();
+        if buf.len() + taken > max {
+            return Err(oversized_line());
+        }
+        buf.extend_from_slice(available);
+        reader.consume(taken);
+    }
+    String::from_utf8(buf).map(Some).map_err(io::Error::other)
+}
+
+fn oversized_line() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "input line exceeds the maximum size",
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{BufReader, read_bounded_line};
+
+    #[tokio::test]
+    async fn reads_lines_then_eof() {
+        let mut r = BufReader::new(b"hello\nworld\n".as_slice());
+        assert_eq!(
+            read_bounded_line(&mut r, 1024).await.unwrap().unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            read_bounded_line(&mut r, 1024).await.unwrap().unwrap(),
+            "world"
+        );
+        assert!(read_bounded_line(&mut r, 1024).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn returns_a_trailing_unterminated_line() {
+        let mut r = BufReader::new(b"abc".as_slice());
+        assert_eq!(
+            read_bounded_line(&mut r, 1024).await.unwrap().unwrap(),
+            "abc"
+        );
+        assert!(read_bounded_line(&mut r, 1024).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_line_over_the_cap() {
+        // No newline within the cap → rejected rather than buffered unbounded.
+        let mut r = BufReader::new(b"aaaaaaaaaaaaaaaa".as_slice());
+        assert!(read_bounded_line(&mut r, 4).await.is_err());
     }
 }

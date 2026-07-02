@@ -1,11 +1,12 @@
 //! The parse-neutral command model.
 
+use std::str::FromStr;
+
 use crate::access::AccessLevel;
 use crate::api::market_data::{CandleInterval, CandlesQuery};
 use crate::api::orders::{ActiveOrdersQuery, HistoricalOrdersQuery};
 use crate::api::trades::TradesQuery;
 use crate::error::{Error, Result};
-use crate::model::orders::OrderReplacementRequest;
 use crate::{ClientOrderId, Decimal, OrderId, Side};
 
 /// One SDK operation plus its typed arguments, independent of how it was parsed.
@@ -51,10 +52,7 @@ pub enum Command {
     /// Place a market order (real trading).
     PlaceMarket(PlaceMarket),
     /// Atomically replace a resting order (real trading).
-    Replace {
-        id: OrderId,
-        request: OrderReplacementRequest,
-    },
+    Replace(ReplaceOrder),
     /// Cancel an order by id (real trading).
     Cancel(OrderId),
     /// Cancel all active orders (real trading).
@@ -87,6 +85,27 @@ pub struct PlaceMarket {
     pub client_order_id: Option<ClientOrderId>,
 }
 
+/// An order replacement.
+///
+/// Like the placements, the raw `size`/`price` stay [`Decimal`] so the SDK is the
+/// single place they are validated and assembled into a request;
+/// [`execute`](super::execute) builds the
+/// [`OrderReplacementRequest`](crate::model::orders::OrderReplacementRequest) and
+/// enforces "at least one of size/price".
+#[derive(Debug)]
+pub struct ReplaceOrder {
+    pub id: OrderId,
+    /// New size; `None` inherits the original order's size.
+    pub size: Option<Decimal>,
+    /// New limit price; `None` inherits the original order's price.
+    pub price: Option<Decimal>,
+    /// Interpret `size` as the quote-currency amount.
+    pub in_quote: bool,
+    /// Make the replacement post-only.
+    pub post_only: bool,
+    pub client_order_id: Option<ClientOrderId>,
+}
+
 impl Command {
     /// The minimum [`AccessLevel`] required to run this command: public market data
     /// and exchange reference lookups need [`Market`](AccessLevel::Market); reading
@@ -116,7 +135,7 @@ impl Command {
             | Self::OrderFills(_) => AccessLevel::View,
             Self::PlaceLimit(_)
             | Self::PlaceMarket(_)
-            | Self::Replace { .. }
+            | Self::Replace(_)
             | Self::Cancel(_)
             | Self::CancelAll => AccessLevel::Trading,
         }
@@ -128,6 +147,15 @@ impl Command {
     pub const fn is_real_trading(&self) -> bool {
         matches!(self.min_access(), AccessLevel::Trading)
     }
+}
+
+/// Parses a decimal order field, tagging the error with the field name.
+///
+/// So a bad `size`/`price` says *which* field was wrong. Shared by surfaces that
+/// accept decimals as text (the CLI), so the message quality is uniform.
+pub fn parse_decimal(field: &str, value: &str) -> Result<Decimal> {
+    Decimal::from_str(value)
+        .map_err(|e| Error::invalid_request(format!("invalid {field} '{value}': {e}")))
 }
 
 /// Maps a candle interval in minutes to a [`CandleInterval`]. Shared by the CLI

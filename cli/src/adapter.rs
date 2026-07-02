@@ -8,15 +8,17 @@ use std::str::FromStr;
 use revolutx::api::market_data::CandlesQuery;
 use revolutx::api::orders::{ActiveOrdersQuery, HistoricalOrdersQuery};
 use revolutx::api::trades::TradesQuery;
-use revolutx::commands::{Command, PlaceLimit, PlaceMarket, candle_interval};
-use revolutx::model::orders::{ExecutionInstruction, OrderReplacementRequest};
-use revolutx::{ClientOrderId, Decimal, OrderId, Price, Quantity, Side};
+use revolutx::commands::{
+    Command, PlaceLimit, PlaceMarket, ReplaceOrder, candle_interval, parse_decimal,
+};
+use revolutx::{ClientOrderId, OrderId, Side};
 
 use crate::args::{Command as ArgCommand, ConfigCmd, MarketCmd, OrderCmd, SideArg, TradeCmd};
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// What the CLI should do with one parsed command.
+#[derive(Debug)]
 pub enum Action {
     /// Run it through the shared dispatcher. `confirmed` is whether `--yes` was
     /// supplied; real-trading commands gate on it (the one-shot path errors, the
@@ -153,8 +155,8 @@ fn orders(command: OrderCmd) -> Res<Action> {
             command: Command::PlaceLimit(PlaceLimit {
                 symbol,
                 side: side_of(side),
-                size: Decimal::from_str(&size)?,
-                price: Decimal::from_str(&price)?,
+                size: parse_decimal("size", &size)?,
+                price: parse_decimal("price", &price)?,
                 in_quote: quote,
                 post_only,
                 client_order_id: parse_client_order_id(client_order_id)?,
@@ -172,7 +174,7 @@ fn orders(command: OrderCmd) -> Res<Action> {
             command: Command::PlaceMarket(PlaceMarket {
                 symbol,
                 side: side_of(side),
-                size: Decimal::from_str(&size)?,
+                size: parse_decimal("size", &size)?,
                 in_quote: quote,
                 client_order_id: parse_client_order_id(client_order_id)?,
             }),
@@ -186,10 +188,14 @@ fn orders(command: OrderCmd) -> Res<Action> {
             post_only,
             yes,
         } => Action::Run {
-            command: Command::Replace {
+            command: Command::Replace(ReplaceOrder {
                 id: OrderId::new(&id),
-                request: replacement(size, price, quote, post_only)?,
-            },
+                size: size.map(|s| parse_decimal("size", &s)).transpose()?,
+                price: price.map(|p| parse_decimal("price", &p)).transpose()?,
+                in_quote: quote,
+                post_only,
+                client_order_id: None,
+            }),
             confirmed: yes,
         },
         OrderCmd::Cancel { id, yes } => Action::Run {
@@ -203,38 +209,6 @@ fn orders(command: OrderCmd) -> Res<Action> {
     })
 }
 
-/// Builds an order-replacement request from the optional `--size`/`--price`
-/// (validating positivity via the SDK's `Quantity`/`Price`), refusing an empty
-/// replacement.
-fn replacement(
-    size: Option<String>,
-    price: Option<String>,
-    quote: bool,
-    post_only: bool,
-) -> Res<OrderReplacementRequest> {
-    let size = size.map(|s| Decimal::from_str(&s)).transpose()?;
-    let (base_size, quote_size) = match (size, quote) {
-        (Some(amount), false) => (Some(Quantity::new(amount)?), None),
-        (Some(amount), true) => (None, Some(Quantity::new(amount)?)),
-        (None, _) => (None, None),
-    };
-    let price = price
-        .map(|p| Decimal::from_str(&p))
-        .transpose()?
-        .map(Price::new)
-        .transpose()?;
-    if base_size.is_none() && quote_size.is_none() && price.is_none() {
-        return Err("replace needs at least one of --size or --price".into());
-    }
-    Ok(OrderReplacementRequest {
-        client_order_id: ClientOrderId::default(),
-        base_size,
-        quote_size,
-        price,
-        execution_instructions: post_only.then(|| vec![ExecutionInstruction::PostOnly]),
-    })
-}
-
 const fn side_of(side: SideArg) -> Side {
     match side {
         SideArg::Buy => Side::Buy,
@@ -245,4 +219,92 @@ const fn side_of(side: SideArg) -> Side {
 /// Parses an optional client-order-id (a UUID); `None` lets the SDK generate one.
 fn parse_client_order_id(value: Option<String>) -> Res<Option<ClientOrderId>> {
     Ok(value.map(|s| ClientOrderId::from_str(&s)).transpose()?)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::args::Cli;
+    use clap::Parser;
+
+    /// Parses a CLI line through the real clap grammar and adapts it.
+    fn adapt_line(args: &[&str]) -> Res<Action> {
+        adapt(Cli::try_parse_from(args).unwrap().command)
+    }
+
+    #[test]
+    fn limit_order_threads_every_flag() {
+        // A dropped `--quote`/`--post-only`/`--yes` (or swapped size/price) would
+        // fail here — the mapping had no coverage before.
+        let action = adapt_line(&[
+            "revolutx",
+            "orders",
+            "limit",
+            "buy",
+            "BTC-USD",
+            "0.1",
+            "50000",
+            "--quote",
+            "--post-only",
+            "--yes",
+        ])
+        .unwrap();
+        let Action::Run {
+            command: Command::PlaceLimit(o),
+            confirmed,
+        } = action
+        else {
+            panic!("expected a PlaceLimit run action");
+        };
+        assert_eq!(o.symbol, "BTC-USD");
+        assert_eq!(o.side, Side::Buy);
+        assert_eq!(o.size, parse_decimal("size", "0.1").unwrap());
+        assert_eq!(o.price, parse_decimal("price", "50000").unwrap());
+        assert!(o.in_quote);
+        assert!(o.post_only);
+        assert!(confirmed);
+    }
+
+    #[test]
+    fn a_bad_decimal_names_the_offending_field() {
+        let err = adapt_line(&[
+            "revolutx",
+            "orders",
+            "limit",
+            "buy",
+            "BTC-USD",
+            "not-a-number",
+            "50000",
+            "--yes",
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("size"), "message was: {err}");
+    }
+
+    #[test]
+    fn replace_maps_optional_size_and_price() {
+        let action = adapt_line(&[
+            "revolutx", "orders", "replace", "oid-1", "--price", "51000", "--yes",
+        ])
+        .unwrap();
+        let Action::Run {
+            command: Command::Replace(r),
+            confirmed,
+        } = action
+        else {
+            panic!("expected a Replace run action");
+        };
+        assert_eq!(r.id.as_str(), "oid-1");
+        assert_eq!(r.price, Some(parse_decimal("price", "51000").unwrap()));
+        assert!(r.size.is_none());
+        assert!(confirmed);
+    }
+
+    #[test]
+    fn market_watch_is_a_watch_action() {
+        let action =
+            adapt_line(&["revolutx", "market", "watch", "BTC-USD", "--interval", "5"]).unwrap();
+        assert!(matches!(action, Action::Watch { interval: 5, .. }));
+    }
 }

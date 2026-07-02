@@ -46,14 +46,14 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   msrv:
-    name: build on MSRV (1.87)
+    name: build on MSRV (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: true
-      - name: Install Rust 1.87
-        uses: dtolnay/rust-toolchain@1.87.0
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88.0
       # The CLI's default `fido2` feature builds ctap-hid-fido2/hidapi (USB-HID).
       - name: Install FIDO2 build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev

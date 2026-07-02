@@ -30,6 +30,26 @@ pub enum Error {
     )]
     MissingCredentials,
 
+    /// An API key was supplied to the config loader without a private key.
+    #[error(
+        "an API key was provided but no private key (set REVOLUTX_PRIVATE_KEY_PEM or REVOLUTX_PRIVATE_KEY_PATH)"
+    )]
+    MissingPrivateKey,
+
+    /// A private key was supplied to the config loader without an API key.
+    #[error("a private key was provided but no API key (set REVOLUTX_API_KEY)")]
+    MissingApiKey,
+
+    /// A private key file referenced by the config loader could not be read.
+    #[error("could not read private key file '{path}': {source}")]
+    KeyFile {
+        /// Path that failed to read.
+        path: String,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The Ed25519 private key could not be parsed or loaded.
     #[error("invalid private key: {message}")]
     Key {
@@ -287,17 +307,20 @@ struct ErrorPayload {
 #[cfg(feature = "rest")]
 const MAX_BODY_PREVIEW: usize = 2048;
 
+/// Truncates a raw response body to a bounded, UTF-8-safe preview for error
+/// context. Shared by the transport error classifier and the client's
+/// unexpected-status path so the truncation rule lives in one place.
 #[cfg(feature = "rest")]
-fn truncate_body(body: &str) -> String {
-    if body.len() <= MAX_BODY_PREVIEW {
-        body.to_owned()
-    } else {
-        let mut end = MAX_BODY_PREVIEW;
-        while !body.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}… ({} bytes total)", &body[..end], body.len())
+pub(crate) fn preview(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= MAX_BODY_PREVIEW {
+        return text.into_owned();
     }
+    let mut end = MAX_BODY_PREVIEW;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… ({} bytes total)", &text[..end], bytes.len())
 }
 
 /// Builds the appropriate [`Error`] from a non-success HTTP response.
@@ -336,7 +359,7 @@ pub(crate) fn classify_error_response(
     } else {
         Error::Unexpected {
             status,
-            body: truncate_body(&String::from_utf8_lossy(body)),
+            body: preview(body),
         }
     }
 }

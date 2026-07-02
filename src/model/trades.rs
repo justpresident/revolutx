@@ -54,9 +54,10 @@ pub struct Fill {
     /// Id of the order this fill belongs to (`oid`).
     #[serde(rename = "oid")]
     pub order_id: OrderId,
-    /// The side of the order (`s`).
-    #[serde(rename = "s")]
-    pub side: Side,
+    /// The side of the order (`s`). Optional: the exchange does not mark it
+    /// required, so a fill that omits it still deserializes.
+    #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<Side>,
     /// Whether this execution was a maker (`true`) or taker (`false`) (`im`).
     #[serde(rename = "im")]
     pub is_maker: bool,

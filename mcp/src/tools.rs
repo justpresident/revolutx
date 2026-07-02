@@ -15,7 +15,7 @@ use std::str::FromStr;
 use revolutx::api::market_data::{CandleInterval, CandlesQuery};
 use revolutx::api::orders::{ActiveOrdersQuery, HistoricalOrdersQuery};
 use revolutx::api::trades::TradesQuery;
-use revolutx::commands::{Command, PlaceLimit, PlaceMarket};
+use revolutx::commands::{Command, PlaceLimit, PlaceMarket, ReplaceOrder};
 use revolutx::{ClientOrderId, Decimal, OrderId, Side};
 use serde_json::{Value, json};
 
@@ -47,6 +47,7 @@ const GET_ORDER: &str = "get_order";
 const GET_ORDER_FILLS: &str = "get_order_fills";
 const PLACE_LIMIT_ORDER: &str = "place_limit_order";
 const PLACE_MARKET_ORDER: &str = "place_market_order";
+const REPLACE_ORDER: &str = "replace_order";
 const CANCEL_ORDER: &str = "cancel_order";
 const CANCEL_ALL_ORDERS: &str = "cancel_all_orders";
 
@@ -219,6 +220,23 @@ pub fn list() -> Vec<Value> {
             }),
         ));
     tools.push(tool(
+        REPLACE_ORDER,
+        "Atomically replace a resting order by its venue order id, changing its size and/or price (at least one). REAL TRADING. Requires the agent at --access trading.",
+        json!({
+            "type": "object",
+            "properties": {
+                "order_id": { "type": "string", "description": "Venue order id (UUID) of the order to replace" },
+                "size": { "type": "string", "description": "New size as a decimal string; omit to keep the current size" },
+                "price": { "type": "string", "description": "New limit price as a decimal string; omit to keep the current price" },
+                "size_in_quote": { "type": "boolean",
+                    "description": "If true, size is in the quote currency instead of the base currency" },
+                "post_only": { "type": "boolean", "description": "Make the replacement post-only" },
+                "client_order_id": { "type": "string", "description": "Optional UUID idempotency key" }
+            },
+            "required": ["order_id"]
+        }),
+    ));
+    tools.push(tool(
         CANCEL_ORDER,
         "Cancel a single order by its venue order id. REAL TRADING.",
         order_id_schema(),
@@ -245,11 +263,11 @@ pub fn to_command(name: &str, args: &Value) -> Result<Command, String> {
         GET_CURRENCIES => Command::Currencies,
         GET_PAIRS => Command::Pairs,
         GET_TICKERS => Command::Tickers {
-            symbols: opt_str_vec(args, "symbols"),
+            symbols: opt_str_vec(args, "symbols")?,
         },
         GET_ORDER_BOOK => Command::OrderBook {
             symbol: req_str(args, "symbol")?,
-            limit: opt_u32(args, "limit"),
+            limit: opt_u32(args, "limit")?,
         },
         GET_PUBLIC_ORDER_BOOK => Command::PublicOrderBook {
             symbol: req_str(args, "symbol")?,
@@ -258,32 +276,32 @@ pub fn to_command(name: &str, args: &Value) -> Result<Command, String> {
             symbol: req_str(args, "symbol")?,
             query: CandlesQuery {
                 interval: opt_candle_interval(args)?,
-                since: opt_i64(args, "since"),
-                until: opt_i64(args, "until"),
+                since: opt_i64(args, "since")?,
+                until: opt_i64(args, "until")?,
             },
         },
         GET_LAST_TRADES => Command::LastTrades,
         GET_ALL_TRADES => Command::AllTrades {
             symbol: req_str(args, "symbol")?,
-            query: trades_query(args),
+            query: trades_query(args)?,
         },
         GET_PRIVATE_TRADES => Command::PrivateTrades {
             symbol: req_str(args, "symbol")?,
-            query: trades_query(args),
+            query: trades_query(args)?,
         },
         GET_ACTIVE_ORDERS => Command::ActiveOrders(ActiveOrdersQuery {
-            symbols: opt_str_vec(args, "symbols"),
+            symbols: opt_str_vec(args, "symbols")?,
             side: opt_side(args)?,
-            cursor: opt_str(args, "cursor"),
-            limit: opt_u32(args, "limit"),
+            cursor: opt_str(args, "cursor")?,
+            limit: opt_u32(args, "limit")?,
             ..Default::default()
         }),
         GET_HISTORICAL_ORDERS => Command::HistoricalOrders(HistoricalOrdersQuery {
-            symbols: opt_str_vec(args, "symbols"),
-            start_date: opt_i64(args, "start_date"),
-            end_date: opt_i64(args, "end_date"),
-            cursor: opt_str(args, "cursor"),
-            limit: opt_u32(args, "limit"),
+            symbols: opt_str_vec(args, "symbols")?,
+            start_date: opt_i64(args, "start_date")?,
+            end_date: opt_i64(args, "end_date")?,
+            cursor: opt_str(args, "cursor")?,
+            limit: opt_u32(args, "limit")?,
             ..Default::default()
         }),
         GET_ORDER => Command::GetOrder(OrderId::new(req_str(args, "order_id")?)),
@@ -293,15 +311,23 @@ pub fn to_command(name: &str, args: &Value) -> Result<Command, String> {
             side: req_side(args)?,
             size: req_decimal(args, "size")?,
             price: req_decimal(args, "price")?,
-            in_quote: opt_bool(args, "size_in_quote").unwrap_or(false),
-            post_only: opt_bool(args, "post_only").unwrap_or(false),
+            in_quote: opt_bool(args, "size_in_quote")?.unwrap_or(false),
+            post_only: opt_bool(args, "post_only")?.unwrap_or(false),
             client_order_id: opt_client_order_id(args)?,
         }),
         PLACE_MARKET_ORDER => Command::PlaceMarket(PlaceMarket {
             symbol: req_str(args, "symbol")?,
             side: req_side(args)?,
             size: req_decimal(args, "size")?,
-            in_quote: opt_bool(args, "size_in_quote").unwrap_or(false),
+            in_quote: opt_bool(args, "size_in_quote")?.unwrap_or(false),
+            client_order_id: opt_client_order_id(args)?,
+        }),
+        REPLACE_ORDER => Command::Replace(ReplaceOrder {
+            id: OrderId::new(req_str(args, "order_id")?),
+            size: opt_decimal(args, "size")?,
+            price: opt_decimal(args, "price")?,
+            in_quote: opt_bool(args, "size_in_quote")?.unwrap_or(false),
+            post_only: opt_bool(args, "post_only")?.unwrap_or(false),
             client_order_id: opt_client_order_id(args)?,
         }),
         CANCEL_ORDER => Command::Cancel(OrderId::new(req_str(args, "order_id")?)),
@@ -351,13 +377,13 @@ fn trades_schema() -> Value {
     })
 }
 
-fn trades_query(args: &Value) -> TradesQuery {
-    TradesQuery {
-        start_date: opt_i64(args, "start_date"),
-        end_date: opt_i64(args, "end_date"),
-        cursor: opt_str(args, "cursor"),
-        limit: opt_u32(args, "limit"),
-    }
+fn trades_query(args: &Value) -> Result<TradesQuery, String> {
+    Ok(TradesQuery {
+        start_date: opt_i64(args, "start_date")?,
+        end_date: opt_i64(args, "end_date")?,
+        cursor: opt_str(args, "cursor")?,
+        limit: opt_u32(args, "limit")?,
+    })
 }
 
 fn req_str(args: &Value, key: &str) -> Result<String, String> {
@@ -367,58 +393,99 @@ fn req_str(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required string argument '{key}'"))
 }
 
-fn opt_str(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(Value::as_str).map(str::to_string)
+// The optional-argument helpers treat an *absent* key as `None`/empty, but a
+// *present but wrong-typed* value as an error rather than silently coercing it to
+// "absent". For an LLM-driven surface, "limit": "10" quietly becoming no limit
+// (the largest page) or a numeric cursor being dropped (re-fetching page 1) is a
+// worse failure than a clear rejection the model can correct.
+fn opt_str(args: &Value, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(format!("argument '{key}' must be a string")),
+    }
 }
 
-fn opt_i64(args: &Value, key: &str) -> Option<i64> {
-    args.get(key).and_then(Value::as_i64)
+fn opt_i64(args: &Value, key: &str) -> Result<Option<i64>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| format!("argument '{key}' must be an integer")),
+    }
 }
 
-fn opt_u32(args: &Value, key: &str) -> Option<u32> {
-    args.get(key)
-        .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n).ok())
+fn opt_u32(args: &Value, key: &str) -> Result<Option<u32>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| format!("argument '{key}' must be an integer in 0..=4294967295")),
+    }
 }
 
-fn opt_bool(args: &Value, key: &str) -> Option<bool> {
-    args.get(key).and_then(Value::as_bool)
+fn opt_bool(args: &Value, key: &str) -> Result<Option<bool>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(format!("argument '{key}' must be a boolean")),
+    }
 }
 
-fn opt_str_vec(args: &Value, key: &str) -> Vec<String> {
-    args.get(key)
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+fn opt_str_vec(args: &Value, key: &str) -> Result<Vec<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("every item in '{key}' must be a string"))
+            })
+            .collect(),
+        Some(_) => Err(format!("argument '{key}' must be an array of strings")),
+    }
 }
 
-/// Accepts a decimal supplied either as a JSON string or a JSON number.
+/// Parses a required decimal argument for an order's price or size.
+///
+/// Accepts a JSON **string** (the advertised, exact form) or an integer JSON
+/// number. A *fractional* or out-of-`u64`-range JSON number is rejected: with no
+/// `arbitrary_precision`, `serde_json` parses those through `f64`, which would
+/// silently round a high-precision price or size — a real-money corruption. The
+/// caller should always send decimals as strings.
 fn req_decimal(args: &Value, key: &str) -> Result<Decimal, String> {
     let raw = match args.get(key) {
         Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        Some(_) => {
+        // Only integers survive JSON's numeric parse exactly; take those as-is.
+        Some(Value::Number(n)) if n.is_i64() || n.is_u64() => n.to_string(),
+        Some(Value::Number(_)) => {
             return Err(format!(
-                "argument '{key}' must be a decimal string or number"
+                "argument '{key}' must be a decimal *string* — a fractional or very large \
+                 JSON number loses precision; send it quoted, e.g. \"0.1\""
             ));
         }
+        Some(_) => return Err(format!("argument '{key}' must be a decimal string")),
         None => return Err(format!("missing required argument '{key}'")),
     };
     Decimal::from_str(&raw).map_err(|e| format!("invalid decimal for '{key}': {e}"))
 }
 
-fn req_side(args: &Value) -> Result<Side, String> {
-    match req_str(args, "side")?.as_str() {
-        "buy" => Ok(Side::Buy),
-        "sell" => Ok(Side::Sell),
-        other => Err(format!(
-            "'side' must be \"buy\" or \"sell\", got \"{other}\""
-        )),
+/// Parses an optional decimal argument (a replacement's size/price), with the
+/// same precision-safe rules as [`req_decimal`] — string or integer only; a
+/// present-but-fractional number is rejected, an absent key is `None`.
+fn opt_decimal(args: &Value, key: &str) -> Result<Option<Decimal>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => req_decimal(args, key).map(Some),
     }
+}
+
+fn req_side(args: &Value) -> Result<Side, String> {
+    Side::from_str(&req_str(args, "side")?).map_err(|e| e.to_string())
 }
 
 fn opt_side(args: &Value) -> Result<Option<Side>, String> {
@@ -429,7 +496,7 @@ fn opt_side(args: &Value) -> Result<Option<Side>, String> {
 }
 
 fn opt_client_order_id(args: &Value) -> Result<Option<ClientOrderId>, String> {
-    opt_str(args, "client_order_id").map_or(Ok(None), |raw| {
+    opt_str(args, "client_order_id")?.map_or(Ok(None), |raw| {
         ClientOrderId::from_str(&raw)
             .map(Some)
             .map_err(|e| e.to_string())
@@ -438,7 +505,7 @@ fn opt_client_order_id(args: &Value) -> Result<Option<ClientOrderId>, String> {
 
 fn opt_candle_interval(args: &Value) -> Result<Option<CandleInterval>, String> {
     // Reuse the shared minutes→interval mapping so it lives in one place.
-    opt_i64(args, "interval_minutes").map_or(Ok(None), |minutes| {
+    opt_i64(args, "interval_minutes")?.map_or(Ok(None), |minutes| {
         revolutx::commands::candle_interval(minutes)
             .map(Some)
             .map_err(|e| e.to_string())
@@ -477,17 +544,36 @@ mod tests {
     }
 
     #[test]
-    fn req_decimal_accepts_string_and_number() {
-        let args = json!({ "a": "0.1", "b": 5 });
+    fn req_decimal_accepts_string_and_integer_but_rejects_fractional_number() {
+        let args = json!({ "a": "0.1", "b": 5, "c": 0.1 });
+        // Strings are exact.
         assert_eq!(
             req_decimal(&args, "a").unwrap(),
             Decimal::from_str("0.1").unwrap()
         );
+        // Integers survive JSON's numeric parse exactly.
         assert_eq!(
             req_decimal(&args, "b").unwrap(),
             Decimal::from_str("5").unwrap()
         );
+        // A fractional JSON number is rejected (it would have gone through f64).
+        assert!(req_decimal(&args, "c").is_err());
         assert!(req_decimal(&args, "missing").is_err());
+    }
+
+    #[test]
+    fn optional_args_reject_wrong_types_instead_of_dropping_them() {
+        // Absent → None/empty; present-but-mistyped → Err (not silently dropped).
+        assert_eq!(opt_u32(&json!({}), "limit").unwrap(), None);
+        assert!(opt_u32(&json!({ "limit": "10" }), "limit").is_err());
+        assert!(opt_str(&json!({ "cursor": 5 }), "cursor").is_err());
+        assert!(opt_bool(&json!({ "post_only": "yes" }), "post_only").is_err());
+        assert!(opt_str_vec(&json!({ "symbols": "BTC-USD" }), "symbols").is_err());
+        assert!(opt_str_vec(&json!({ "symbols": [1, 2] }), "symbols").is_err());
+        assert_eq!(
+            opt_str_vec(&json!({ "symbols": ["BTC-USD"] }), "symbols").unwrap(),
+            vec!["BTC-USD".to_string()]
+        );
     }
 
     #[test]
@@ -537,5 +623,67 @@ mod tests {
         assert!(to_command(GET_ORDER_BOOK, &json!({})).is_err());
         // An unrecognized tool name → Err.
         assert!(to_command("get_nothing", &json!({})).is_err());
+    }
+
+    #[test]
+    fn replace_order_tool_builds_a_replace_command() {
+        let cmd = to_command(
+            REPLACE_ORDER,
+            &json!({ "order_id": "7a52e92e-8639-4fe1-abaa-68d3a2d5234b", "price": "51000" }),
+        )
+        .unwrap();
+        assert!(matches!(cmd, Command::Replace(_)));
+        // A replacement number that would lose precision is rejected, like placements.
+        assert!(to_command(REPLACE_ORDER, &json!({ "order_id": "x", "price": 0.1 }),).is_err());
+    }
+
+    #[test]
+    fn every_command_variant_maps_to_a_catalog_tool() {
+        // Exhaustive match: a new `Command` variant fails to compile here until
+        // it is given an MCP tool name (or explicitly excluded with `None`) — so
+        // no command can silently lack an MCP surface, as `replace` once did. The
+        // `Option` return is the opt-out slot, hence every arm is currently `Some`.
+        #[allow(clippy::unnecessary_wraps)]
+        fn tool_for(cmd: &Command) -> Option<&'static str> {
+            match cmd {
+                Command::Balances => Some(GET_BALANCES),
+                Command::Currencies => Some(GET_CURRENCIES),
+                Command::Pairs => Some(GET_PAIRS),
+                Command::Tickers { .. } => Some(GET_TICKERS),
+                Command::OrderBook { .. } => Some(GET_ORDER_BOOK),
+                Command::PublicOrderBook { .. } => Some(GET_PUBLIC_ORDER_BOOK),
+                Command::Candles { .. } => Some(GET_CANDLES),
+                Command::LastTrades => Some(GET_LAST_TRADES),
+                Command::AllTrades { .. } => Some(GET_ALL_TRADES),
+                Command::PrivateTrades { .. } => Some(GET_PRIVATE_TRADES),
+                Command::ActiveOrders(_) => Some(GET_ACTIVE_ORDERS),
+                Command::HistoricalOrders(_) => Some(GET_HISTORICAL_ORDERS),
+                Command::GetOrder(_) => Some(GET_ORDER),
+                Command::OrderFills(_) => Some(GET_ORDER_FILLS),
+                Command::PlaceLimit(_) => Some(PLACE_LIMIT_ORDER),
+                Command::PlaceMarket(_) => Some(PLACE_MARKET_ORDER),
+                Command::Replace(_) => Some(REPLACE_ORDER),
+                Command::Cancel(_) => Some(CANCEL_ORDER),
+                Command::CancelAll => Some(CANCEL_ALL_ORDERS),
+            }
+        }
+
+        // Every tool this mapping names is actually advertised in the catalog.
+        let catalog = list();
+        let names: Vec<&str> = catalog
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for expected in [
+            tool_for(&Command::Balances),
+            tool_for(&Command::CancelAll),
+            tool_for(&Command::Cancel(OrderId::new("x"))),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(names.contains(&expected), "missing tool: {expected}");
+        }
+        assert!(names.contains(&REPLACE_ORDER));
     }
 }

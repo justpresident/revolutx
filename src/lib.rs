@@ -109,6 +109,15 @@ mod keygen;
 #[cfg(feature = "rest")]
 pub mod transport;
 
+// The agent is built on unix-domain sockets and peer credentials; there is no
+// Windows equivalent. Fail with a clear message instead of a confusing error
+// deep inside tokio when the feature is enabled on a non-unix target.
+#[cfg(all(feature = "agent", not(unix)))]
+compile_error!(
+    "the `agent` feature is unix-only (it uses unix-domain sockets and SO_PEERCRED); \
+     build without it on non-unix targets"
+);
+
 #[cfg(feature = "agent")]
 pub mod agent;
 
@@ -123,7 +132,7 @@ pub use auth::{Ed25519Signer, RequestAuth, Signer};
 #[cfg(feature = "rest")]
 pub use client::{ClientBuilder, Environment, RevolutXClient};
 #[cfg(feature = "rest")]
-pub use config::{ClientConfig, ConfigError, client_from_env};
+pub use config::{ClientConfig, client_from_env};
 pub use error::{ApiError, ApiErrorKind, Error, Result};
 #[cfg(feature = "rest")]
 pub use keygen::{GeneratedKeyPair, generate_key_pair, public_pem_from_private_pem};

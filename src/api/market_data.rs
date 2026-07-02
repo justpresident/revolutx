@@ -1,8 +1,10 @@
 //! Market data endpoints.
 
+use crate::api::comma_joined;
 use crate::client::RevolutXClient;
 use crate::error::Result;
 use crate::model::Data;
+use crate::model::common::dash_symbol;
 use crate::model::market_data::{Candle, LastTrades, OrderBook, Tickers};
 use crate::transport::{RequestSpec, encode_component};
 
@@ -100,14 +102,14 @@ impl<'a> MarketDataApi<'a> {
 
     /// `GET /order-book/{symbol}` — order book snapshot (authenticated).
     pub async fn order_book(&self, symbol: &str) -> Result<OrderBook> {
-        let path = format!("/order-book/{}", encode_component(symbol));
+        let path = format!("/order-book/{}", encode_component(&dash_symbol(symbol)));
         self.client.send_json(RequestSpec::get(path)).await
     }
 
     /// `GET /order-book/{symbol}?limit=` — order book snapshot capped at `limit`
     /// levels per side (1–20).
     pub async fn order_book_with_limit(&self, symbol: &str, limit: u32) -> Result<OrderBook> {
-        let path = format!("/order-book/{}", encode_component(symbol));
+        let path = format!("/order-book/{}", encode_component(&dash_symbol(symbol)));
         self.client
             .send_json(RequestSpec::get(path).with_query(vec![("limit".into(), limit.to_string())]))
             .await
@@ -116,13 +118,16 @@ impl<'a> MarketDataApi<'a> {
     /// `GET /public/order-book/{symbol}` — order book snapshot from the public
     /// (unauthenticated) endpoint.
     pub async fn public_order_book(&self, symbol: &str) -> Result<OrderBook> {
-        let path = format!("/public/order-book/{}", encode_component(symbol));
+        let path = format!(
+            "/public/order-book/{}",
+            encode_component(&dash_symbol(symbol))
+        );
         self.client.send_json(RequestSpec::get(path).public()).await
     }
 
     /// `GET /candles/{symbol}` — historical OHLCV candles.
     pub async fn candles(&self, symbol: &str, query: &CandlesQuery) -> Result<Vec<Candle>> {
-        let path = format!("/candles/{}", encode_component(symbol));
+        let path = format!("/candles/{}", encode_component(&dash_symbol(symbol)));
         let data: Data<Vec<Candle>> = self
             .client
             .send_json(RequestSpec::get(path).with_query(query.to_query()))
@@ -137,10 +142,7 @@ impl<'a> MarketDataApi<'a> {
 
     /// `GET /tickers?symbols=` — tickers for the given trading pairs.
     pub async fn tickers_for<S: AsRef<str> + Sync>(&self, symbols: &[S]) -> Result<Tickers> {
-        let query = symbols
-            .iter()
-            .map(|s| ("symbols".to_string(), s.as_ref().to_string()))
-            .collect();
+        let query = comma_joined("symbols", symbols.iter().map(|s| dash_symbol(s.as_ref())));
         self.client
             .send_json(RequestSpec::get("/tickers").with_query(query))
             .await

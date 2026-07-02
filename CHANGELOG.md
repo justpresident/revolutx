@@ -38,10 +38,25 @@ changed.
   operator sees each peer's uid/gid/pid.
 - The agent response-frame ceiling is raised 1 MiB → 8 MiB, since legitimate
   market-data responses (deep candle windows, all-pairs ticker lists) can be several MiB.
+- **Breaking:** `ConfigError` is removed; `ClientConfig::build` and `client_from_env`
+  now return the crate `Error` (new `MissingApiKey`, `MissingPrivateKey`, `KeyFile`
+  variants), so configuration and build failures are one error type.
+- **Breaking (`commands`):** `Command::Replace` carries raw fields (`ReplaceOrder`);
+  the `OrderReplacementRequest` is assembled and validated ("at least one of size/price")
+  in `commands::execute`, mirroring the placements.
+- `orders().place()` validates a hand-built request locally (exactly one configuration
+  and size); builders reject the `Unknown` execution instruction; order filters reject
+  the `Unknown` state/type variant.
+
+### Added
+
+- `FromStr` for `Side` and `AccessLevel`; `commands::parse_decimal` (field-tagged
+  decimal parsing shared by the surfaces).
 
 ### Removed
 
 - `serve` — replaced by `AgentServer::new` + `AgentServer::run` (with `AgentControl`).
+- `ConfigError` — folded into the crate `Error` (see Changed).
 
 ### Fixed
 
@@ -50,6 +65,43 @@ changed.
   client connection and broke every later request. `AgentExecutor` also marks its
   connection unusable after a transport error, so a desync fails fast with a clear
   "reconnect" error rather than reading misframed bytes.
+- Array query parameters (`symbols`, `order_states`, `order_types` on active/historical
+  orders and `tickers_for`) are sent as a single comma-joined value in the exchange's
+  `form`/`explode=false` style, not as repeated keys that a server may bind to only one
+  value (silently under-reporting filtered orders).
+- Symbols are normalized to the exchange's dash form (`BTC-USD`) at the endpoint
+  boundary and in order placement, so a slash-form pairs-map key (`BTC/USD`) no longer
+  becomes a `%2F` path that 404s.
+- A request path/query that changes under URL normalization (e.g. a `.`/`..` order id
+  or symbol) is rejected with `Error::InvalidRequest` before signing — previously a
+  caller-reachable panic in debug builds and a sign-one-path/send-another mismatch in
+  release.
+- `Fill.side` is now `Option<Side>`, matching the spec (which does not mark it
+  required), so a fill without it deserializes instead of failing the page.
+- `BookSide`, `TriggerType`, and `TriggerDirection` gained an `Unknown`
+  forward-compatibility variant, so one new server value no longer fails
+  deserialization of a whole order book / orders page.
+- Timestamp `Display` and `Side`/`OrderId`/`ClientOrderId` `Display` honor format width,
+  so tabulated output aligns.
+
+### Security
+
+- The signing agent caps concurrent connections (`MAX_CONNECTIONS`) and deadlines the
+  first-frame read, so a local peer cannot exhaust file descriptors/tasks/registry
+  entries with silent connections.
+- The socket's directory is treated as the integrity boundary: a directory the agent
+  creates is made `0711` (world-*traversable* so other-UID clients — e.g. containers —
+  can still connect, but not world-*writable*), and a pre-existing directory is
+  validated (owned by the agent or root, and not group/other-writable without the
+  sticky bit) so another user cannot unlink or replace the socket. This also closes the
+  stale-socket-removal → bind race. An operator's deliberately-shared directory is
+  honored (validated, never re-`chmod`ed), so cross-UID clients are not locked out.
+- Client-supplied connection labels are length-bounded and control-character-sanitized
+  on ingest (and again at console display), preventing terminal/log injection that
+  could forge the peer info the operator relies on when granting.
+- Frame buffers carrying the one-time token are zeroized after use (defense-in-depth).
+- The `agent` feature fails with a clear `compile_error!` on non-unix targets.
+- Bumped `time` to ≥ 0.3.47 (RUSTSEC-2026-0009); MSRV is now **1.88**.
 
 ## [0.4.0] - 2026-06-30
 

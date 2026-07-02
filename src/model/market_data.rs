@@ -17,6 +17,10 @@ pub enum BookSide {
     /// A resting buy order (bid).
     #[serde(rename = "BUYI")]
     Buy,
+    /// A side this SDK version does not recognize (forward compatibility) — so a
+    /// new wire value does not fail deserialization of a whole order book.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A single aggregated price level in an order book.

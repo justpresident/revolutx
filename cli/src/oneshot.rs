@@ -4,14 +4,13 @@
 //! now live in the shared `revolutx::commands` layer (also used by the REPL and,
 //! later, the MCP).
 
-use std::time::Duration;
-
 use revolutx::RevolutXClient;
-use revolutx::commands::{self, Command as Op};
+use revolutx::commands;
 
 use crate::adapter::{Action, adapt};
 use crate::args::{Command, GlobalOpts};
 use crate::human::render;
+use crate::watch::{enter_pressed, poll_order_book};
 
 type Res = Result<(), Box<dyn std::error::Error>>;
 
@@ -29,43 +28,12 @@ pub async fn run(global: &GlobalOpts, command: Command, client: &RevolutXClient)
             println!("{}", render(global.json, &output)?);
             Ok(())
         }
-        Action::Watch { symbol, interval } => watch(global.json, client, &symbol, interval).await,
-    }
-}
-
-/// `market watch`: poll the order book and re-render until Ctrl-C. Tolerates
-/// transient errors (log and keep going) and honors `--json`. Shared by the
-/// one-shot path and the REPL (where Ctrl-C returns to the prompt).
-pub async fn watch(json: bool, client: &RevolutXClient, symbol: &str, interval: u64) -> Res {
-    let interval = interval.max(1);
-    let poll = async {
-        loop {
-            match commands::execute(
-                client,
-                Op::OrderBook {
-                    symbol: symbol.to_owned(),
-                    limit: None,
-                },
-            )
-            .await
-            {
-                Ok(output) => {
-                    if !json {
-                        println!("--- {symbol} ---");
-                    }
-                    match render(json, &output) {
-                        Ok(text) => println!("{text}"),
-                        Err(e) => eprintln!("watch: {e}"),
-                    }
-                }
-                Err(e) => eprintln!("watch: {e}"),
-            }
-            tokio::time::sleep(Duration::from_secs(interval)).await;
+        Action::Watch { symbol, interval } => {
+            // `market watch` needs credentials, so it runs under the SIGINT
+            // hardening `main` installs; Enter (not Ctrl-C) is the stop signal.
+            println!("watching {symbol} — press Enter to stop.");
+            poll_order_book(global.json, client, &symbol, interval, enter_pressed()).await;
+            Ok(())
         }
-    };
-    tokio::select! {
-        () = poll => {}
-        _ = tokio::signal::ctrl_c() => eprintln!("\n(watch stopped)"),
     }
-    Ok(())
 }
