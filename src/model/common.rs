@@ -91,6 +91,10 @@ impl fmt::Display for Symbol {
 /// shape some responses and the pairs-map key use — without allocating when it
 /// is already dashed. The endpoint layer applies this so a symbol taken straight
 /// from `configuration().pairs()` reaches the wire in the accepted form.
+///
+/// `rest`-only: it exists for the REST endpoint layer (the models compile without
+/// `rest`, where nothing calls it).
+#[cfg(feature = "rest")]
 pub(crate) fn dash_symbol(symbol: &str) -> Cow<'_, str> {
     if symbol.contains('/') {
         Cow::Owned(symbol.replace('/', "-"))
