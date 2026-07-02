@@ -41,7 +41,7 @@ automatically with Ed25519, and never represents money or quantities as `f64`
 
 ```toml
 [dependencies]
-revolutx = "0.4"
+revolutx = "0.5"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -62,7 +62,7 @@ A FIX-only consumer (e.g. a market maker) can drop the HTTP/TLS dependency tree
 entirely:
 
 ```toml
-revolutx = { version = "0.3", default-features = false, features = ["fix"] }
+revolutx = { version = "0.5", default-features = false, features = ["fix"] }
 ```
 
 ## Generating an API key

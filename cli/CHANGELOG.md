@@ -5,7 +5,7 @@ documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.
 and [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The `revolutx`
 library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 
-## [Unreleased]
+## [0.3.0] - 2026-07-02
 
 `agent start` becomes a persistent, multi-client agent with an interactive operator
 console.

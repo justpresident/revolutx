@@ -9,7 +9,7 @@ The binaries track their changes in their own changelogs:
 [`mcp/CHANGELOG.md`](mcp/CHANGELOG.md) (`revolutx-mcp`). Through 0.3.0, library and
 binary changes were logged together in this file.
 
-## [Unreleased]
+## [0.5.0] - 2026-07-02
 
 Reworks the signing agent into a **persistent, multi-client authorizer** with
 per-connection access, and hardens its transport. Breaking: the agent's public API
