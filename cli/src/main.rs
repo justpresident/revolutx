@@ -35,6 +35,7 @@ mod line;
 mod oneshot;
 mod progress;
 mod repl;
+mod term;
 mod watch;
 
 use std::process::ExitCode;
@@ -52,15 +53,23 @@ fn main() -> ExitCode {
 
     // Harden before any threads/runtime exist (the fork happens here).
     if command.needs_secrets() && !global.insecure_allow_debugging {
-        // The interactive shell must survive Ctrl-C (it stops `watch` with Enter,
-        // not a signal). BLOCK SIGINT *before* the ptrace-protection fork: a SIGINT
-        // delivered to the traced child triggers a ptrace signal-delivery-stop,
-        // which the watchdog parent treats as an attack and kills the child —
-        // orphaning the shell. Blocking prevents delivery (so no stop), and the
-        // parent's `waitpid` is likewise uninterrupted. Inherited by both fork
-        // halves. (Ignoring the signal is not enough — the stop happens first.)
-        if matches!(&command, Command::Cli { .. }) {
-            block_sigint();
+        // Any signal delivered to the traced child triggers a ptrace
+        // signal-delivery-stop, which rcypher 0.4's watchdog parent treats as
+        // an attack: it SIGKILLs the child on the spot — no message, no
+        // cleanup, and a raw-mode console never restores the terminal. That
+        // includes signals the terminal generates in normal use — a window
+        // resize (SIGWINCH) or Ctrl-Z (SIGTSTP) would kill a hardened command
+        // outright. Block the benign ones for every hardened command, BEFORE
+        // the fork so both halves inherit the mask. (Ignoring a signal is not
+        // enough — the ptrace stop happens before disposition.)
+        block_signals(&[libc::SIGWINCH, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU]);
+        // The interactive shell and the agent must survive Ctrl-C too (the
+        // shell stops `watch` with Enter, and both read Ctrl-C as a rustyline
+        // keystroke in raw mode, driving a graceful shutdown — no real SIGINT
+        // is needed). One-shot commands keep SIGINT deliverable so they remain
+        // interruptible.
+        if matches!(&command, Command::Cli { .. } | Command::Agent { .. }) {
+            block_signals(&[libc::SIGINT]);
         }
         if revolutx::keystore::enable_ptrace_protection().is_err() {
             eprintln!(
@@ -119,18 +128,19 @@ fn fail(e: &dyn std::error::Error) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Blocks SIGINT for this process and any later fork, so Ctrl-C neither
-/// interrupts the ptrace-protection watchdog parent nor triggers a ptrace
-/// signal-delivery-stop that would have it kill the (traced) child. The
-/// interactive shell stops `watch` with Enter, and rustyline reads Ctrl-C as a
-/// keystroke (raw mode), so no real SIGINT is needed.
-fn block_sigint() {
+/// Blocks the given signals for this process and any later fork, so they are
+/// never *delivered* — which under the ptrace-protection watchdog means they
+/// can no longer trigger the signal-delivery-stop its parent kills the child
+/// for (see the call site in `main`).
+fn block_signals(signals: &[libc::c_int]) {
     // SAFETY: sigprocmask and the sigset ops are async-signal-safe; we are
     // single-threaded and pre-runtime here. `sigemptyset` initializes the set.
     unsafe {
         let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
         libc::sigemptyset(set.as_mut_ptr());
-        libc::sigaddset(set.as_mut_ptr(), libc::SIGINT);
+        for signal in signals {
+            libc::sigaddset(set.as_mut_ptr(), *signal);
+        }
         libc::sigprocmask(libc::SIG_BLOCK, set.as_ptr(), std::ptr::null_mut());
     }
 }

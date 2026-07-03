@@ -34,6 +34,7 @@ use tokio::sync::Notify;
 
 use crate::args::{AgentCmd, GlobalOpts};
 use crate::creds;
+use crate::term::{RestoreOnDrop, SavedTerminal};
 
 /// Operator-console command names offered by completion (aliases like `ls`/`?`
 /// still work but are not suggested).
@@ -64,6 +65,13 @@ fn start(
 ) -> Res<()> {
     let socket_path = socket.unwrap_or_else(default_socket_path);
 
+    // The console below holds the terminal in raw mode while blocked in
+    // readline; every exit path must restore it or the user's shell is left
+    // raw and the farewell prints garbled. Capture the state up front; the
+    // guard covers panic unwinds.
+    let terminal = SavedTerminal::capture();
+    let _restore_on_panic = RestoreOnDrop(terminal);
+
     // An optional one-time token for headless clients (e.g. the MCP). When omitted,
     // connections are authorized only interactively from the console below.
     let token = if auth_token {
@@ -93,6 +101,7 @@ fn start(
         idle_timeout,
         socket_path.clone(),
         Arc::clone(&idle_shutdown),
+        terminal,
     );
     // The operator console reads stdin on its own thread and drives `control`.
     spawn_console(control);
@@ -108,22 +117,23 @@ fn start(
     eprintln!(
         "revolutx-agent: operator console ready — type `help` (list, grant <id> [tier], deny <id>, quit)"
     );
-    let result = runtime.block_on(async {
+    let result: Res<Option<&str>> = runtime.block_on(async {
         tokio::select! {
-            outcome = server.run(&socket_path) => outcome.map_err(Into::into),
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("revolutx-agent: shutting down");
-                Ok(())
-            }
-            () = idle_shutdown.notified() => {
-                eprintln!("revolutx-agent: idle timeout — locking and exiting");
-                Ok(())
-            }
+            outcome = server.run(&socket_path) => outcome.map(|()| None).map_err(Into::into),
+            _ = tokio::signal::ctrl_c() => Ok(Some("shutting down")),
+            () = idle_shutdown.notified() => Ok(Some("idle timeout — locking and exiting")),
         }
     });
+    // Leave raw mode BEFORE the farewell (the console thread may still be
+    // blocked in readline), so the message renders legibly and the shell the
+    // user returns to works.
+    terminal.restore();
     // Best-effort cleanup so the next start does not see a stale socket.
     let _ = std::fs::remove_file(&socket_path);
-    result
+    if let Some(reason) = result? {
+        eprintln!("revolutx-agent: {reason}");
+    }
+    Ok(())
 }
 
 /// Prints the one-time authentication token prominently to stderr (the operator's
@@ -423,6 +433,7 @@ fn spawn_watchdog(
     idle_timeout: u64,
     socket_path: PathBuf,
     idle_shutdown: Arc<Notify>,
+    terminal: SavedTerminal,
 ) {
     if !check_debugger && idle_timeout == 0 {
         return;
@@ -436,6 +447,7 @@ fn spawn_watchdog(
                 idle_timeout,
                 &socket_path,
                 &idle_shutdown,
+                terminal,
             );
         });
 }
@@ -446,6 +458,7 @@ fn watchdog_loop(
     idle_timeout: u64,
     socket_path: &std::path::Path,
     idle_shutdown: &Notify,
+    terminal: SavedTerminal,
 ) {
     let mut prev = Instant::now();
     // When the last authorized client leaves (or none ever arrives), we start
@@ -458,12 +471,12 @@ fn watchdog_loop(
         // A frozen or rewound monotonic clock is consistent with a debugger pause
         // or VM time manipulation — exit *now*, no graceful unwind.
         if now.saturating_duration_since(prev).is_zero() {
-            exit(socket_path, 1, "clock anomaly");
+            exit(socket_path, terminal, 1, "clock anomaly");
         }
         prev = now;
 
         if check_debugger && revolutx::keystore::is_debugger_attached() {
-            exit(socket_path, 1, "debugger detected");
+            exit(socket_path, terminal, 1, "debugger detected");
         }
 
         // Idle auto-lock: shut down *gracefully* (via the runtime) so the keystore
@@ -482,7 +495,11 @@ fn watchdog_loop(
     }
 }
 
-fn exit(socket_path: &std::path::Path, code: i32, reason: &str) -> ! {
+fn exit(socket_path: &std::path::Path, terminal: SavedTerminal, code: i32, reason: &str) -> ! {
+    // Leave the console's raw mode before printing, or the reason renders
+    // garbled and the user's shell is left broken (process::exit runs no
+    // destructors, so rustyline would never restore the terminal).
+    terminal.restore();
     eprintln!("revolutx-agent: {reason}, locking and exiting");
     // process::exit skips the daemon's normal cleanup, so remove the socket here.
     let _ = std::fs::remove_file(socket_path);

@@ -5,6 +5,30 @@ documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.
 and [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The `revolutx`
 library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 
+## [Unreleased]
+
+### Fixed
+
+- The agent no longer dies silently — killed by its own ptrace-protection
+  watchdog — when the terminal delivers an everyday signal. Under
+  `PTRACE_TRACEME`, *any* delivered signal stops the traced child first, and
+  rcypher 0.4's watchdog parent treats every such stop as an attack and
+  SIGKILLs it — so a terminal **window resize** (SIGWINCH) or Ctrl-Z (SIGTSTP)
+  killed a hardened command outright: no message, no cleanup, and the
+  operator console's raw-mode terminal left broken. The benign
+  terminal-generated signals (SIGWINCH, SIGTSTP, SIGTTIN, SIGTTOU) are now
+  blocked for every hardened command before the protection fork, and SIGINT is
+  blocked for the agent like it already was for the shell (Ctrl-C still works —
+  rustyline reads it as a keystroke and shuts down gracefully). SIGTERM/SIGHUP
+  remain lethal under rcypher 0.4's watchdog; the proper fix (re-injecting
+  signals with `PTRACE_CONT` instead of killing) belongs in rcypher.
+- Every agent exit path now restores the terminal state captured at startup —
+  the idle auto-lock, a server error, Ctrl-C, panics, and the watchdog's hard
+  exits previously ended the process while the operator console still held the
+  terminal in raw mode, leaving the shell unusable and printing the farewell
+  (e.g. "idle timeout — locking and exiting") garbled into it, which read as a
+  crash with no logs.
+
 ## [0.3.1] - 2026-07-03
 
 ### Changed
