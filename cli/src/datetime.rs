@@ -1,13 +1,15 @@
 //! Human-friendly date/time parsing for CLI flags.
 //!
-//! Accepts a calendar date (`2024-01-31`), a date and time (`"2024-01-31 14:30"`
-//! or `2024-01-31T14:30:00`), a full RFC 3339 timestamp, a relative offset before
-//! now (`7d`, `24h`, `30m`, `45s`, `2w`, or `now`), or a raw epoch integer.
-//! A raw integer is auto-detected as seconds or milliseconds by magnitude (see
-//! [`epoch_millis`]), so a pasted seconds value is not silently read as 1970.
-//! Naive forms are interpreted as UTC. Returns Unix epoch milliseconds — what the
-//! API expects — so it plugs in as a clap `value_parser` and the rest of the code
-//! keeps working with `i64`.
+//! Accepts a calendar date (`2024-01-31`), a month (`2024-01`), a year
+//! (`2024`), a date and time (`"2024-01-31 14:30"` or `2024-01-31T14:30:00`), a
+//! full RFC 3339 timestamp, a relative offset before now (`7d`, `24h`, `30m`,
+//! `45s`, `2w`, or `now`), or a raw epoch integer. A bare integer in
+//! `1970..=9999` is a year (a raw epoch that small would be an instant in early
+//! 1970 — never what a query means); larger integers are auto-detected as epoch
+//! seconds or milliseconds by magnitude (see [`epoch_millis`]), so a pasted
+//! seconds value is not silently read as 1970. Naive forms are interpreted as
+//! UTC. Returns Unix epoch milliseconds — what the API expects — so it plugs in
+//! as a clap `value_parser` and the rest of the code keeps working with `i64`.
 
 use std::fmt;
 
@@ -46,13 +48,44 @@ pub fn parse_when(input: &str) -> Result<i64, DateParseError> {
             return Ok(millis);
         }
     }
+    if let Some(millis) = parse_year_month(s) {
+        return Ok(millis);
+    }
     if let Ok(n) = s.parse::<i64>() {
+        // A bare 1970..=9999 is a year: as an epoch it would be an instant in
+        // the first minutes of 1970, which no query ever means — while `2026`
+        // as "the year 2026" is exactly what a human types.
+        if let Ok(year) = i32::try_from(n)
+            && (1970..=9999).contains(&year)
+        {
+            return calendar_millis(year, 1, 1)
+                .ok_or_else(|| DateParseError(format!("invalid year '{input}'")));
+        }
         return Ok(epoch_millis(n));
     }
     Err(DateParseError(format!(
-        "invalid date/time '{input}' — use e.g. 2024-01-31, \"2024-01-31 14:30\", an RFC3339 \
-         timestamp, a relative 7d/24h/30m, or epoch seconds/milliseconds"
+        "invalid date/time '{input}' — use e.g. 2024-01-31, 2024-01, 2024, \
+         \"2024-01-31 14:30\", an RFC3339 timestamp, a relative 7d/24h/30m, or epoch \
+         seconds/milliseconds"
     )))
+}
+
+/// `2024-05` → midnight UTC on the first of that month.
+fn parse_year_month(s: &str) -> Option<i64> {
+    let (year, month) = s.split_once('-')?;
+    if year.len() != 4 {
+        return None;
+    }
+    let year: i32 = year.parse().ok()?;
+    let month: u8 = month.parse().ok()?;
+    calendar_millis(year, month, 1)
+}
+
+/// Midnight UTC on the given calendar day, as epoch milliseconds.
+fn calendar_millis(year: i32, month: u8, day: u8) -> Option<i64> {
+    let month = time::Month::try_from(month).ok()?;
+    let date = Date::from_calendar_date(year, month, day).ok()?;
+    Some(millis_of(date.with_hms(0, 0, 0).ok()?.assume_utc()))
 }
 
 /// Magnitude at or above which a bare epoch integer is read as milliseconds, and
@@ -160,7 +193,18 @@ mod tests {
     }
 
     #[test]
+    fn bare_year_and_year_month_are_calendar_dates_not_epochs() {
+        // `2026` used to be read as a bare epoch (an instant in early 1970),
+        // which sent range queries walking half a century of empty windows.
+        assert_eq!(parse_when("2026").unwrap(), 1_767_225_600_000); // 2026-01-01T00:00:00Z
+        assert_eq!(parse_when("2026-05").unwrap(), 1_777_593_600_000); // 2026-05-01T00:00:00Z
+        // Realistic epochs (too large to be years) still parse as epochs.
+        assert_eq!(parse_when("1706659200").unwrap(), 1_706_659_200_000);
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!(parse_when("not-a-date").is_err());
+        assert!(parse_when("2026-13").is_err()); // no thirteenth month
     }
 }

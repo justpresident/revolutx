@@ -25,6 +25,39 @@ binary changes were logged together in this file.
   is why no typed `tpsl` placement API ships.
 - `as_str()` on `TimeInForce`, `TriggerType`, and `TriggerDirection`, matching
   the existing `OrderType`/`OrderStatus` accessors.
+- `orders().historical_range(&HistoricalOrdersQuery)`: fetches historical
+  orders over an **arbitrary** date range. The endpoint answers at most 30
+  days per query, and a missing `end_date` defaults *server-side* to
+  `start_date` + 7 days (not "now"), so "everything since May" was silently
+  truncated or rejected when asked in one request. The new method defaults
+  `end_date` to now, walks the range in 30-day windows (newest first),
+  follows every pagination cursor, dedupes across window boundaries, and
+  returns one merged page sorted newest-first (`limit` caps the total).
+  A mid-walk 429 is retried after the server-advised delay (bounded per
+  walk), and ranges wider than ~8 years are refused locally — at one query
+  per 30 days that is a hundred requests, and a start that far back is
+  almost certainly a typo'd epoch. The server's range rules are now
+  documented on `HistoricalOrdersQuery` and `TradesQuery`.
+- `trades().private_range(symbol, &TradesQuery)`: the same arbitrary-range
+  walk for the account's own executions (`GET /trades/private/{symbol}`),
+  which shares the endpoint's 30-day/7-day range rules. Dedupes boundary
+  duplicates by trade id and sorts newest-first by execution time. Both
+  walkers share one implementation (`api::range`).
+
+### Fixed
+
+- `trades().all()` and `trades().private()` now normalize a slash-form symbol
+  (`BTC/USD`, the pairs-map key form) to the dashed path form the exchange
+  accepts, like every other symbol-taking endpoint already did. Previously the
+  slash was percent-encoded into the request path and the exchange rejected
+  it. Symbols can now be given in either form everywhere.
+- The shared command layer's `HistoricalOrders` and `PrivateTrades` (CLI
+  `orders historical` / `trades mine`, REPL, MCP `get_historical_orders` /
+  `get_private_trades`) now fetch the **whole** requested range via the range
+  walkers when a `start_date` is given without a manual `cursor`. Previously a
+  query with only a start date silently covered just 7 days from that date —
+  orders and fills older than a week appeared to not exist. Cursor queries
+  still pass through verbatim as one request.
 - `Error::is_connection_unusable()` and a distinct `Error::AgentUnusable` variant
   (agent feature): a transport error on the signing-agent stream now surfaces as
   a typed, permanently-unusable condition rather than a generic `Agent` error, so

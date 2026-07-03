@@ -90,7 +90,7 @@ pub fn list() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "symbols": { "type": "array", "items": { "type": "string" },
-                        "description": "Optional list of symbols (e.g. [\"BTC-USD\"]); omit for all pairs." }
+                        "description": "Optional list of symbols in either form (e.g. [\"BTC-USD\"]); omit for all pairs." }
                 },
                 "required": []
             }),
@@ -101,7 +101,7 @@ pub fn list() -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD" },
+                    "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD (BTC/USD also accepted)" },
                     "limit": { "type": "integer", "description": "Levels per side, 1-20" }
                 },
                 "required": ["symbol"]
@@ -110,7 +110,7 @@ pub fn list() -> Vec<Value> {
         tool(
             GET_PUBLIC_ORDER_BOOK,
             "Get an order book snapshot for a symbol from the public (unauthenticated) endpoint.",
-            symbol_schema("Trading pair, e.g. BTC-USD"),
+            symbol_schema("Trading pair, e.g. BTC-USD (BTC/USD also accepted)"),
         ),
         tool(
             GET_CANDLES,
@@ -118,7 +118,7 @@ pub fn list() -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD" },
+                    "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD (BTC/USD also accepted)" },
                     "interval_minutes": { "type": "integer",
                         "description": "Candle interval in minutes; one of 1,5,15,30,60,240,1440,2880,5760,10080,20160,40320" },
                     "since": { "type": "integer", "description": "Start time, Unix epoch milliseconds" },
@@ -139,7 +139,11 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             GET_PRIVATE_TRADES,
-            "Get the account's own executions for a symbol (paginated). Requires credentials.",
+            "Get the account's own executions (fills) for a symbol (paginated). \
+             Requires credentials. With start_date and no cursor, the full range \
+             through end_date (default: now) is fetched — the exchange's 30-day \
+             query cap is walked in windows — and limit caps the total, newest \
+             first. Without start_date the exchange returns only the last 7 days.",
             trades_schema(),
         ),
         tool(
@@ -158,15 +162,19 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             GET_HISTORICAL_ORDERS,
-            "Get historical (finished) orders (paginated). Requires credentials.",
+            "Get historical (finished) orders (paginated). Requires credentials. \
+             With start_date and no cursor, the full range through end_date \
+             (default: now) is fetched — the exchange's 30-day query cap is \
+             walked in windows — and limit caps the total, newest first. \
+             Without start_date the exchange returns only the last 7 days.",
             json!({
                 "type": "object",
                 "properties": {
                     "symbols": { "type": "array", "items": { "type": "string" } },
-                    "start_date": { "type": "integer", "description": "Unix epoch milliseconds" },
-                    "end_date": { "type": "integer", "description": "Unix epoch milliseconds" },
-                    "cursor": { "type": "string" },
-                    "limit": { "type": "integer", "description": "1-1900" }
+                    "start_date": { "type": "integer", "description": "Unix epoch milliseconds; the whole range through end_date is fetched" },
+                    "end_date": { "type": "integer", "description": "Unix epoch milliseconds (default: now when start_date is set)" },
+                    "cursor": { "type": "string", "description": "manual pagination: passes the query through as one request" },
+                    "limit": { "type": "integer", "description": "1-1900; with start_date, caps the total across the range" }
                 },
                 "required": []
             }),
@@ -191,7 +199,7 @@ pub fn list() -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD" },
+                    "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD (BTC/USD also accepted)" },
                     "side": { "type": "string", "enum": ["buy", "sell"] },
                     "size": { "type": "string", "description": "Order size as a decimal string" },
                     "price": { "type": "string", "description": "Limit price as a decimal string" },
@@ -209,7 +217,7 @@ pub fn list() -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD" },
+                    "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD (BTC/USD also accepted)" },
                     "side": { "type": "string", "enum": ["buy", "sell"] },
                     "size": { "type": "string", "description": "Order size as a decimal string" },
                     "size_in_quote": { "type": "boolean",
@@ -367,7 +375,7 @@ fn trades_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD" },
+            "symbol": { "type": "string", "description": "Trading pair, e.g. BTC-USD (BTC/USD also accepted)" },
             "start_date": { "type": "integer", "description": "Unix epoch milliseconds" },
             "end_date": { "type": "integer", "description": "Unix epoch milliseconds" },
             "cursor": { "type": "string" },

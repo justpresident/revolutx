@@ -9,6 +9,14 @@ it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 
 ### Changed
 
+- `get_historical_orders` and `get_private_trades` with `start_date` and no
+  `cursor` now fetch the whole range through `end_date` (default: now),
+  walking the exchange's 30-day query cap in windows; `limit` caps the total,
+  newest first. Previously the exchange silently answered only the 7 days
+  after `start_date`. The tool descriptions document the server's range rules.
+- Symbols are accepted in either form (`BTC-USD` or `BTC/USD`) in all tools:
+  `get_all_trades` and `get_private_trades` previously rejected the slash form
+  (via the library fix; the other tools already normalized it).
 - On a tool call, a lost agent connection (`Error::is_connection_unusable`) now
   drops the stale session and returns a clear "call `authenticate` again" hint,
   instead of repeating the same transport error until the caller reconnects.

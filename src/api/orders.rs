@@ -8,7 +8,7 @@
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use crate::api::comma_joined;
+use crate::api::{comma_joined, range};
 use crate::client::RevolutXClient;
 use crate::error::{Error, Result};
 use crate::model::common::{ClientOrderId, OrderId, Price, Quantity, Side, Symbol, dash_symbol};
@@ -136,6 +136,13 @@ fn reject_unknown_filters(states: &[OrderStatus], types: &[OrderType]) -> Result
 
 /// Filters for `GET /orders/historical`. Timestamps are Unix epoch
 /// milliseconds.
+///
+/// The endpoint's server-side range rules are easy to trip over: one query
+/// answers **at most 30 days**; a missing `start_date` defaults to 7 days
+/// before `end_date`; and a missing `end_date` defaults to `start_date` +
+/// **7 days** when `start_date` is given (not "now"), or to now otherwise. Use
+/// [`OrdersApi::historical_range`] to fetch an arbitrary range without hitting
+/// those rules.
 #[derive(Debug, Clone, Default)]
 pub struct HistoricalOrdersQuery {
     /// Restrict to these symbols.
@@ -145,9 +152,10 @@ pub struct HistoricalOrdersQuery {
     pub order_states: Vec<OrderStatus>,
     /// Restrict to these order types (`market`, `limit`).
     pub order_types: Vec<OrderType>,
-    /// Start of the query range.
+    /// Start of the query range (server default: 7 days before `end_date`).
     pub start_date: Option<i64>,
-    /// End of the query range.
+    /// End of the query range (server default: `start_date` + 7 days when
+    /// `start_date` is given, otherwise now).
     pub end_date: Option<i64>,
     /// Pagination cursor from a previous page.
     pub cursor: Option<String>,
@@ -359,6 +367,54 @@ impl<'a> OrdersApi<'a> {
             .send_json(RequestSpec::get("/orders/historical").with_query(query.to_query()?))
             .await?;
         Ok(raw.into())
+    }
+
+    /// `GET /orders/historical` over an **arbitrary** date range.
+    ///
+    /// A single query answers at most 30 days, and a missing `end_date`
+    /// defaults server-side to `start_date` + 7 days — so "everything since
+    /// May" is silently truncated or rejected when asked in one request. This
+    /// walks the full range instead: `end_date` defaults to *now*, the range
+    /// is split into windows the endpoint accepts (newest first), and every
+    /// pagination cursor within each window is followed.
+    ///
+    /// `query.start_date` is required and `query.cursor` must be unset (the
+    /// walk manages its own pagination). `query.limit` caps the **total**
+    /// number of orders returned, newest first. The merged result is sorted
+    /// newest-first by creation date; its `next_cursor` is always `None`.
+    ///
+    /// The walk fires one request per window (plus one per continuation
+    /// cursor), so it tolerates rate limiting: a 429 is retried after the
+    /// server-advised delay, up to a bounded number of times per walk. Ranges
+    /// wider than ~8 years are refused outright — at one query per 30 days
+    /// that is a hundred requests, and a start date that far back is almost
+    /// certainly a typo (for example an epoch value pasted in the wrong unit).
+    pub async fn historical_range(&self, query: &HistoricalOrdersQuery) -> Result<Page<Order>> {
+        let plan = range::plan(
+            "historical_range",
+            query.start_date,
+            query.end_date,
+            query.cursor.is_some(),
+            query.limit,
+        )?;
+        range::walk(
+            &plan,
+            |window_start, window_end, cursor| {
+                let window_query = HistoricalOrdersQuery {
+                    symbols: query.symbols.clone(),
+                    order_states: query.order_states.clone(),
+                    order_types: query.order_types.clone(),
+                    start_date: Some(window_start),
+                    end_date: Some(window_end),
+                    cursor,
+                    limit: query.limit,
+                };
+                async move { self.historical(&window_query).await }
+            },
+            |order| order.id.clone(),
+            |order| order.created_date,
+        )
+        .await
     }
 
     /// `DELETE /orders/{id}` — cancels a single order.

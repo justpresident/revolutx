@@ -7,6 +7,39 @@ library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.m
 
 ## [Unreleased]
 
+### Changed
+
+- The date-range flags are now `--since` / `--until` on `orders historical`,
+  `trades all`, and `trades mine`, matching `market candles`. The old
+  `--start-date` / `--end-date` spellings remain accepted as hidden aliases.
+
+### Fixed
+
+- `trades mine --since <when>` now returns the whole range through `--until`
+  (default: now), walking the exchange's 30-day query cap in windows — the
+  same fix `orders historical` got, since the endpoint shares the same
+  server-side range rules (previously only the 7 days after the start date
+  were returned).
+
+- `orders historical --start-date <when>` now returns the whole range through
+  `--end-date` (default: now). The exchange answers at most 30 days per query
+  and defaults a missing end date to start + 7 days, so the command previously
+  showed only the first week after `--start-date` — and a bare
+  `orders historical` covers only the last 7 days (now documented in `--help`,
+  along with the same server rules on `trades all` / `trades mine`). Ranges
+  beyond 30 days are fetched in windows automatically; `--limit` caps the
+  total, newest first; `--cursor` remains verbatim manual pagination.
+- Date flags now accept a bare year (`2026`) and a year-month (`2026-05`),
+  reading them as calendar dates. A bare `2026` was previously parsed as a raw
+  *epoch* — an instant in early 1970 — which turned a historical-orders range
+  into a half-century walk that tripped the exchange's rate limit. Epoch
+  values large enough to be real timestamps still parse as epochs.
+- An empty orders listing prints `(no orders)` instead of a bare header row
+  that read like a rendering bug.
+- Symbols are accepted in either form (`BTC-USD` or `BTC/USD`) in all
+  commands: the two `trades` commands previously rejected the slash form
+  (via the library fix; the other commands already normalized it).
+
 ### Added
 
 - `orders get` now shows trigger details (`condition:`, `t/profit:`, `s/loss:`)

@@ -7,6 +7,7 @@ pub mod balances;
 pub mod configuration;
 pub mod market_data;
 pub mod orders;
+pub(crate) mod range;
 pub mod trades;
 
 /// Builds the query pairs for an array parameter in the exchange's

@@ -12,7 +12,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use revolutx::api::market_data::{CandleInterval, CandlesQuery};
-use revolutx::api::orders::ActiveOrdersQuery;
+use revolutx::api::orders::{ActiveOrdersQuery, HistoricalOrdersQuery};
 use revolutx::api::trades::TradesQuery;
 use revolutx::model::orders::OrderStatus;
 use revolutx::{Decimal, OrderId, RevolutXClient, Side};
@@ -112,6 +112,260 @@ async fn place_limit_order_sends_minified_signed_body() {
         ack.venue_order_id.as_str(),
         "7a52e92e-8639-4fe1-abaa-68d3a2d5234b"
     );
+}
+
+/// A minimal historical-order JSON body for the range-walk tests.
+fn historical_order_json(id: &str, created: i64) -> String {
+    format!(
+        r#"{{"id":"{id}","client_order_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","symbol":"BTC/USD","side":"sell","type":"limit","quantity":"1","filled_quantity":"1","leaves_quantity":"0","status":"filled","time_in_force":"gtc","created_date":{created},"updated_date":{created}}}"#
+    )
+}
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+#[tokio::test]
+async fn historical_range_walks_windows_and_follows_cursors() {
+    let start = 1_000_000_000_000_i64;
+    let end = start + 45 * DAY_MS;
+    // The newest window is 30 days minus 1 ms wide; the second one reaches
+    // back to `start` and shares its boundary instant with the first.
+    let boundary = end - (30 * DAY_MS - 1);
+
+    let w1p1 = format!(
+        r#"{{"data":[{},{}],"metadata":{{"timestamp":1,"next_cursor":"c1"}}}}"#,
+        historical_order_json("A", end - 100),
+        historical_order_json("B", boundary),
+    );
+    let w1p2 = r#"{"data":[],"metadata":{"timestamp":1,"next_cursor":""}}"#;
+    // The boundary order comes back again in the older window: the walker
+    // must drop the duplicate.
+    let w2p1 = format!(
+        r#"{{"data":[{},{}],"metadata":{{"timestamp":1,"next_cursor":""}}}}"#,
+        historical_order_json("B", boundary),
+        historical_order_json("C", start + 500),
+    );
+    let server = MockServer::start_sequence(&[(200, &w1p1), (200, w1p2), (200, &w2p1)]);
+    let client = auth_client(server.base_url());
+
+    let page = client
+        .orders()
+        .historical_range(&HistoricalOrdersQuery {
+            start_date: Some(start),
+            end_date: Some(end),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let requests = server.recorded_all(3);
+    // Newest window first, its cursor followed, then the older window.
+    assert_eq!(
+        requests[0].query(),
+        format!("start_date={boundary}&end_date={end}")
+    );
+    assert_eq!(
+        requests[1].query(),
+        format!("start_date={boundary}&end_date={end}&cursor=c1")
+    );
+    assert_eq!(
+        requests[2].query(),
+        format!("start_date={start}&end_date={boundary}")
+    );
+
+    // Deduped across the shared boundary and sorted newest-first.
+    let ids: Vec<&str> = page.items.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(ids, ["A", "B", "C"]);
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn historical_range_caps_the_total_at_limit() {
+    let start = 1_000_000_000_000_i64;
+    let body = format!(
+        r#"{{"data":[{},{}],"metadata":{{"timestamp":1,"next_cursor":"more"}}}}"#,
+        historical_order_json("A", start + 200),
+        historical_order_json("B", start + 100),
+    );
+    // One canned response only: hitting the cap must stop the walk without
+    // following the advertised cursor.
+    let server = MockServer::start_sequence(&[(200, &body)]);
+    let client = auth_client(server.base_url());
+
+    let page = client
+        .orders()
+        .historical_range(&HistoricalOrdersQuery {
+            start_date: Some(start),
+            end_date: Some(start + DAY_MS),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let requests = server.recorded_all(1);
+    assert!(requests[0].query().contains("limit=1"));
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id.as_str(), "A");
+}
+
+#[tokio::test]
+async fn slash_form_symbols_normalize_to_dashed_in_trade_paths() {
+    // `BTC/USD` (the pairs-map key form) must reach the wire as `BTC-USD`,
+    // not percent-encoded into a path the exchange rejects.
+    let empty = r#"{"data":[],"metadata":{"timestamp":1,"next_cursor":""}}"#;
+
+    let server = MockServer::start(200, empty);
+    let client = auth_client(server.base_url());
+    client
+        .trades()
+        .all("BTC/USD", &TradesQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(server.recorded().path(), "/api/1.0/trades/all/BTC-USD");
+
+    let server = MockServer::start(200, empty);
+    let client = auth_client(server.base_url());
+    client
+        .trades()
+        .private("BTC/USD", &TradesQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(server.recorded().path(), "/api/1.0/trades/private/BTC-USD");
+}
+
+/// A minimal private-fill wire JSON body for the range-walk tests.
+fn fill_json(trade_id: &str, traded_at: i64) -> String {
+    format!(
+        r#"{{"tdt":{traded_at},"aid":"BTC","anm":"Bitcoin","p":"50000","pc":"USD","pn":"MONE","q":"0.1","qc":"BTC","qn":"UNIT","ve":"REVX","pdt":{traded_at},"vp":"REVX","tid":"{trade_id}","oid":"o-1","s":"sell","im":true}}"#
+    )
+}
+
+#[tokio::test]
+async fn private_trades_range_walks_windows_and_dedupes() {
+    let start = 1_000_000_000_000_i64;
+    let end = start + 45 * DAY_MS;
+    let boundary = end - (30 * DAY_MS - 1);
+
+    let w1 = format!(
+        r#"{{"data":[{},{}],"metadata":{{"timestamp":1,"next_cursor":""}}}}"#,
+        fill_json("T1", end - 100),
+        fill_json("T2", boundary),
+    );
+    let w2 = format!(
+        r#"{{"data":[{},{}],"metadata":{{"timestamp":1,"next_cursor":""}}}}"#,
+        fill_json("T2", boundary),
+        fill_json("T3", start + 500),
+    );
+    let server = MockServer::start_sequence(&[(200, &w1), (200, &w2)]);
+    let client = auth_client(server.base_url());
+
+    let page = client
+        .trades()
+        .private_range(
+            "BTC-USD",
+            &TradesQuery {
+                start_date: Some(start),
+                end_date: Some(end),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let requests = server.recorded_all(2);
+    assert_eq!(requests[0].path(), "/api/1.0/trades/private/BTC-USD");
+    assert_eq!(
+        requests[0].query(),
+        format!("start_date={boundary}&end_date={end}")
+    );
+    assert_eq!(
+        requests[1].query(),
+        format!("start_date={start}&end_date={boundary}")
+    );
+
+    let ids: Vec<&str> = page.items.iter().map(|f| f.trade_id.as_str()).collect();
+    assert_eq!(ids, ["T1", "T2", "T3"]);
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn historical_range_waits_out_a_rate_limit_and_retries() {
+    let start = 1_000_000_000_000_i64;
+    let ok = format!(
+        r#"{{"data":[{}],"metadata":{{"timestamp":1,"next_cursor":""}}}}"#,
+        historical_order_json("A", start + 100),
+    );
+    // A mid-walk 429 must be retried (after the backoff), not fail the range.
+    let server =
+        MockServer::start_sequence(&[(429, r#"{"message":"Rate limit exceeded"}"#), (200, &ok)]);
+    let client = auth_client(server.base_url());
+
+    let page = client
+        .orders()
+        .historical_range(&HistoricalOrdersQuery {
+            start_date: Some(start),
+            end_date: Some(start + DAY_MS),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let requests = server.recorded_all(2);
+    // The retry repeats the identical window query.
+    assert_eq!(requests[0].query(), requests[1].query());
+    assert_eq!(page.items.len(), 1);
+}
+
+#[tokio::test]
+async fn historical_range_refuses_an_absurdly_wide_range() {
+    // A start date around 1970 (e.g. a year typed where an epoch was parsed)
+    // would mean hundreds of requests; refuse locally, before any request.
+    let client = auth_client("http://127.0.0.1:9/api/1.0");
+    let err = client
+        .orders()
+        .historical_range(&HistoricalOrdersQuery {
+            start_date: Some(2_026_000),
+            end_date: Some(1_751_500_000_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("check"), "was: {err}");
+}
+
+#[tokio::test]
+async fn historical_range_rejects_malformed_ranges_locally() {
+    // No server: every rejection happens before a request is built.
+    let client = auth_client("http://127.0.0.1:9/api/1.0");
+
+    let err = client
+        .orders()
+        .historical_range(&HistoricalOrdersQuery::default())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("start_date"), "was: {err}");
+
+    let err = client
+        .orders()
+        .historical_range(&HistoricalOrdersQuery {
+            start_date: Some(2),
+            end_date: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("precede"), "was: {err}");
+
+    let err = client
+        .orders()
+        .historical_range(&HistoricalOrdersQuery {
+            start_date: Some(1),
+            cursor: Some("c".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("cursor"), "was: {err}");
 }
 
 #[tokio::test]

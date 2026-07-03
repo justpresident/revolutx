@@ -81,30 +81,30 @@ fn trades(command: TradeCmd) -> Command {
     match command {
         TradeCmd::All {
             symbol,
-            start_date,
-            end_date,
+            since,
+            until,
             cursor,
             limit,
         } => Command::AllTrades {
             symbol,
             query: TradesQuery {
-                start_date,
-                end_date,
+                start_date: since,
+                end_date: until,
                 cursor,
                 limit,
             },
         },
         TradeCmd::Mine {
             symbol,
-            start_date,
-            end_date,
+            since,
+            until,
             cursor,
             limit,
         } => Command::PrivateTrades {
             symbol,
             query: TradesQuery {
-                start_date,
-                end_date,
+                start_date: since,
+                end_date: until,
                 cursor,
                 limit,
             },
@@ -128,14 +128,14 @@ fn orders(command: OrderCmd) -> Res<Action> {
         })),
         OrderCmd::Historical {
             symbol,
-            start_date,
-            end_date,
+            since,
+            until,
             cursor,
             limit,
         } => run(Command::HistoricalOrders(HistoricalOrdersQuery {
             symbols: symbol,
-            start_date,
-            end_date,
+            start_date: since,
+            end_date: until,
             cursor,
             limit,
             ..Default::default()
@@ -299,6 +299,51 @@ mod tests {
         assert_eq!(r.price, Some(parse_decimal("price", "51000").unwrap()));
         assert!(r.size.is_none());
         assert!(confirmed);
+    }
+
+    #[test]
+    fn since_until_flags_map_to_query_dates() {
+        let action = adapt_line(&[
+            "revolutx",
+            "orders",
+            "historical",
+            "--since",
+            "2026-05",
+            "--until",
+            "2026-06",
+        ])
+        .unwrap();
+        let Action::Run {
+            command: Command::HistoricalOrders(q),
+            ..
+        } = action
+        else {
+            panic!("expected a HistoricalOrders run action");
+        };
+        assert_eq!(q.start_date, Some(1_777_593_600_000)); // 2026-05-01T00:00:00Z
+        assert_eq!(q.end_date, Some(1_780_272_000_000)); // 2026-06-01T00:00:00Z
+
+        // The pre-rename flag names stay accepted as aliases.
+        let action = adapt_line(&[
+            "revolutx",
+            "trades",
+            "mine",
+            "BTC-USD",
+            "--start-date",
+            "2026-05",
+            "--end-date",
+            "2026-06",
+        ])
+        .unwrap();
+        let Action::Run {
+            command: Command::PrivateTrades { query, .. },
+            ..
+        } = action
+        else {
+            panic!("expected a PrivateTrades run action");
+        };
+        assert_eq!(query.start_date, Some(1_777_593_600_000));
+        assert_eq!(query.end_date, Some(1_780_272_000_000));
     }
 
     #[test]

@@ -327,7 +327,7 @@ fn build_query(params: &[(String, String)]) -> String {
     out
 }
 
-fn now_unix_millis() -> i64 {
+pub(crate) fn now_unix_millis() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

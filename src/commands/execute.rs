@@ -52,13 +52,31 @@ pub async fn execute(client: &RevolutXClient, command: Command) -> Result<Comman
             CommandOutput::AllTrades(client.trades().all(&symbol, &query).await?)
         }
         Command::PrivateTrades { symbol, query } => {
-            CommandOutput::PrivateTrades(client.trades().private(&symbol, &query).await?)
+            // Same server range rules as historical orders (30-day cap, end
+            // defaulting to start + 7 days): an explicit start without a
+            // manual cursor walks the whole range.
+            let page = if query.start_date.is_some() && query.cursor.is_none() {
+                client.trades().private_range(&symbol, &query).await?
+            } else {
+                client.trades().private(&symbol, &query).await?
+            };
+            CommandOutput::PrivateTrades(page)
         }
         Command::ActiveOrders(query) => {
             CommandOutput::Orders(client.orders().active(&query).await?)
         }
         Command::HistoricalOrders(query) => {
-            CommandOutput::Orders(client.orders().historical(&query).await?)
+            // One query answers at most 30 days, and a missing end_date
+            // defaults server-side to start_date + 7 days — so "orders since
+            // May" would be silently truncated. With an explicit start and no
+            // manual cursor, walk the whole range; a cursor query is manual
+            // pagination and passes through verbatim.
+            let page = if query.start_date.is_some() && query.cursor.is_none() {
+                client.orders().historical_range(&query).await?
+            } else {
+                client.orders().historical(&query).await?
+            };
+            CommandOutput::Orders(page)
         }
         Command::GetOrder(id) => CommandOutput::Order(Box::new(client.orders().get(&id).await?)),
         Command::OrderFills(id) => CommandOutput::Fills(client.orders().fills(&id).await?),

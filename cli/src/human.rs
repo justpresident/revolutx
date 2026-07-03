@@ -122,6 +122,10 @@ impl Presenter for HumanPresenter {
                     ));
                 }
             }
+            CommandOutput::Orders(page) if page.items.is_empty() => {
+                // A bare header row reads like a rendering bug; say it plainly.
+                lines.push("(no orders)".to_owned());
+            }
             CommandOutput::Orders(page) => {
                 lines.push(format!(
                     "{:<12} {:<5} {:<8} {:<16} {:>16} {:>16} {:>16}  {}",

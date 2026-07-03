@@ -207,7 +207,7 @@ pub enum MarketCmd {
         /// Interval in minutes (1,5,15,30,60,240,1440,2880,5760,10080,20160,40320).
         #[arg(long)]
         interval: Option<i64>,
-        /// Start time: a date/time (`2024-01-31`), a relative (`7d`), or epoch ms.
+        /// Start time: a date (`2024-01-31`, `2024-01`, `2024`), a relative (`7d`), or epoch ms.
         #[arg(long, value_parser = crate::datetime::parse_when)]
         since: Option<i64>,
         /// End time (same formats as `--since`).
@@ -244,16 +244,21 @@ pub enum OrderCmd {
     Historical {
         #[arg(long)]
         symbol: Vec<String>,
-        /// Start of the range: a date/time (`2024-01-31`, `"2024-01-31 14:30"`), a
+        /// Start of the range: a date (`2024-01-31`, `2024-01`, `2024`), a date/time (`"2024-01-31 14:30"`), a
         /// relative offset (`7d`, `24h`), an RFC3339 timestamp, or epoch ms.
-        #[arg(long, value_parser = crate::datetime::parse_when)]
-        start_date: Option<i64>,
-        /// End of the range (same formats as `--start-date`; defaults to now).
-        #[arg(long, value_parser = crate::datetime::parse_when)]
-        end_date: Option<i64>,
-        /// Pagination cursor from a previous page.
+        /// Without it the exchange returns only the last 7 days.
+        #[arg(long, alias = "start-date", value_parser = crate::datetime::parse_when)]
+        since: Option<i64>,
+        /// End of the range (same formats as `--since`; defaults to now).
+        /// Ranges beyond the exchange's 30-day query cap are fetched in
+        /// windows automatically.
+        #[arg(long, alias = "end-date", value_parser = crate::datetime::parse_when)]
+        until: Option<i64>,
+        /// Pagination cursor from a previous page (manual pagination: passes
+        /// the query through as one request, no window walking).
         #[arg(long)]
         cursor: Option<String>,
+        /// Maximum number of orders to return in total (newest first).
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -341,29 +346,35 @@ pub enum TradeCmd {
     /// Public market trades for a symbol.
     All {
         symbol: String,
-        /// Start of the range: a date/time (`2024-01-31`, `"2024-01-31 14:30"`), a
+        /// Start of the range: a date (`2024-01-31`, `2024-01`, `2024`), a date/time (`"2024-01-31 14:30"`), a
         /// relative offset (`7d`, `24h`), an RFC3339 timestamp, or epoch ms.
-        #[arg(long, value_parser = crate::datetime::parse_when)]
-        start_date: Option<i64>,
-        /// End of the range (same formats as `--start-date`; defaults to now).
-        #[arg(long, value_parser = crate::datetime::parse_when)]
-        end_date: Option<i64>,
+        /// The exchange answers at most 30 days per query; without this it
+        /// returns only the 7 days before `--until`.
+        #[arg(long, alias = "start-date", value_parser = crate::datetime::parse_when)]
+        since: Option<i64>,
+        /// End of the range (same formats as `--since`). The exchange
+        /// defaults it to `--since` + 7 days when that is set, or to now.
+        #[arg(long, alias = "end-date", value_parser = crate::datetime::parse_when)]
+        until: Option<i64>,
         /// Pagination cursor from a previous page.
         #[arg(long)]
         cursor: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
     },
-    /// Your own (private) trades for a symbol.
+    /// Your own (private) trades (executions/fills) for a symbol.
     Mine {
         symbol: String,
-        /// Start of the range: a date/time (`2024-01-31`, `"2024-01-31 14:30"`), a
+        /// Start of the range: a date (`2024-01-31`, `2024-01`, `2024`), a date/time (`"2024-01-31 14:30"`), a
         /// relative offset (`7d`, `24h`), an RFC3339 timestamp, or epoch ms.
-        #[arg(long, value_parser = crate::datetime::parse_when)]
-        start_date: Option<i64>,
-        /// End of the range (same formats as `--start-date`; defaults to now).
-        #[arg(long, value_parser = crate::datetime::parse_when)]
-        end_date: Option<i64>,
+        /// Without it the exchange returns only the last 7 days.
+        #[arg(long, alias = "start-date", value_parser = crate::datetime::parse_when)]
+        since: Option<i64>,
+        /// End of the range (same formats as `--since`; defaults to now).
+        /// Ranges beyond the exchange's 30-day query cap are fetched in
+        /// windows automatically.
+        #[arg(long, alias = "end-date", value_parser = crate::datetime::parse_when)]
+        until: Option<i64>,
         /// Pagination cursor from a previous page.
         #[arg(long)]
         cursor: Option<String>,

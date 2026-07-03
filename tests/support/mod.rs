@@ -123,6 +123,36 @@ impl MockServer {
         }
     }
 
+    /// Starts a server that answers `responses.len()` consecutive requests, in
+    /// order, one connection each (every response carries `Connection: close`,
+    /// so the client reconnects between requests). Collect the recorded
+    /// requests with [`MockServer::recorded_all`].
+    pub fn start_sequence(responses: &[(u16, &str)]) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let base_url = format!("http://{addr}/api/1.0");
+        let (tx, rx) = mpsc::channel();
+        let responses: Vec<(u16, String)> = responses
+            .iter()
+            .map(|(status, body)| (*status, (*body).to_owned()))
+            .collect();
+
+        let handle = thread::spawn(move || {
+            for (status, body) in responses {
+                match listener.accept() {
+                    Ok((stream, _)) => handle_connection(stream, status, &body, &[], &tx),
+                    Err(_) => return,
+                }
+            }
+        });
+
+        MockServer {
+            base_url,
+            rx,
+            handle: Some(handle),
+        }
+    }
+
     /// The base URL to configure the client with (includes `/api/1.0`).
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -138,6 +168,21 @@ impl MockServer {
             let _ = handle.join();
         }
         request
+    }
+
+    /// Blocks until `n` requests have been served, then returns them in order.
+    pub fn recorded_all(mut self, n: usize) -> Vec<RecordedRequest> {
+        let requests = (0..n)
+            .map(|i| {
+                self.rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap_or_else(|_| panic!("request {} of {n} was recorded", i + 1))
+            })
+            .collect();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        requests
     }
 }
 

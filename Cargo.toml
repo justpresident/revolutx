@@ -28,7 +28,16 @@ members = ["cli", "mcp"]
 [features]
 default = ["rest"]
 # REST API: Ed25519-signed HTTP client and the endpoint groups (the current SDK).
-rest = ["dep:reqwest", "dep:ed25519-dalek", "dep:base64", "dep:zeroize", "dep:getrandom"]
+# tokio is for `historical_range`'s rate-limit backoff sleeps (reqwest already
+# depends on tokio, so this adds no new transitive dependency).
+rest = [
+    "dep:reqwest",
+    "dep:ed25519-dalek",
+    "dep:base64",
+    "dep:zeroize",
+    "dep:getrandom",
+    "dep:tokio",
+]
 # FIX 4.4 client (market data + trading). Not yet implemented; reserved so the
 # feature/module layout is in place. See the `fix` backlog task.
 fix = []

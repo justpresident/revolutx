@@ -42,7 +42,7 @@ libc = "0.2"
 rustyline = "18"
 serde = "1"
 serde_json = "1"
-# Human-friendly date/time parsing for `--start-date` etc. (matches the SDK's
+# Human-friendly date/time parsing for `--since`/`--until` etc. (matches the SDK's
 # `time` dependency).
 time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 tokio = { version = "1", features = ["rt", "net", "time", "signal", "macros", "sync"] }
