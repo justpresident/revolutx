@@ -5,7 +5,7 @@ documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.
 and [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The `revolutx`
 library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 
-## [Unreleased]
+## [0.3.1] - 2026-07-03
 
 ### Changed
 
@@ -15,20 +15,15 @@ library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.m
 
 ### Fixed
 
-- `trades mine --since <when>` now returns the whole range through `--until`
-  (default: now), walking the exchange's 30-day query cap in windows — the
-  same fix `orders historical` got, since the endpoint shares the same
-  server-side range rules (previously only the 7 days after the start date
-  were returned).
-
-- `orders historical --start-date <when>` now returns the whole range through
-  `--end-date` (default: now). The exchange answers at most 30 days per query
-  and defaults a missing end date to start + 7 days, so the command previously
-  showed only the first week after `--start-date` — and a bare
-  `orders historical` covers only the last 7 days (now documented in `--help`,
-  along with the same server rules on `trades all` / `trades mine`). Ranges
-  beyond 30 days are fetched in windows automatically; `--limit` caps the
-  total, newest first; `--cursor` remains verbatim manual pagination.
+- `orders historical --since <when>` and `trades mine <symbol> --since <when>`
+  now return the whole range through `--until` (default: now). The exchange
+  answers at most 30 days per query and defaults a missing end date to start +
+  7 days, so these commands previously showed only the first week after the
+  start date — and with no `--since` at all they cover only the last 7 days
+  (now documented in `--help`, along with the same server rules on
+  `trades all`). Ranges beyond 30 days are fetched in windows automatically,
+  with bounded retries on rate limits; `--limit` caps the total, newest first;
+  `--cursor` remains verbatim manual pagination.
 - Date flags now accept a bare year (`2026`) and a year-month (`2026-05`),
   reading them as calendar dates. A bare `2026` was previously parsed as a raw
   *epoch* — an instant in early 1970 — which turned a historical-orders range

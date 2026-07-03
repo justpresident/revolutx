@@ -9,7 +9,7 @@ The binaries track their changes in their own changelogs:
 [`mcp/CHANGELOG.md`](mcp/CHANGELOG.md) (`revolutx-mcp`). Through 0.3.0, library and
 binary changes were logged together in this file.
 
-## [Unreleased]
+## [0.5.1] - 2026-07-03
 
 ### Added
 
@@ -43,6 +43,12 @@ binary changes were logged together in this file.
   which shares the endpoint's 30-day/7-day range rules. Dedupes boundary
   duplicates by trade id and sorts newest-first by execution time. Both
   walkers share one implementation (`api::range`).
+- `Error::is_connection_unusable()` and a distinct `Error::AgentUnusable` variant
+  (agent feature): a transport error on the signing-agent stream now surfaces as
+  a typed, permanently-unusable condition rather than a generic `Agent` error, so
+  clients can reliably decide to reconnect without string-matching the message.
+  The `AgentExecutor`'s send/read failures and its broken-connection guard emit
+  it.
 
 ### Fixed
 
@@ -58,15 +64,6 @@ binary changes were logged together in this file.
   query with only a start date silently covered just 7 days from that date —
   orders and fills older than a week appeared to not exist. Cursor queries
   still pass through verbatim as one request.
-- `Error::is_connection_unusable()` and a distinct `Error::AgentUnusable` variant
-  (agent feature): a transport error on the signing-agent stream now surfaces as
-  a typed, permanently-unusable condition rather than a generic `Agent` error, so
-  clients can reliably decide to reconnect without string-matching the message.
-  The `AgentExecutor`'s send/read failures and its broken-connection guard emit
-  it.
-
-### Fixed
-
 - `OrderBook` now guarantees **best-first ordering** on both sides (`bids`
   price-descending, `asks` price-ascending; stable for equal prices), and its
   docs say so. The exchange returns *both* sides price-descending — best-first

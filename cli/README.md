@@ -51,6 +51,8 @@ revolutx balances
 revolutx market public-order-book BTC-USD       # public, no credentials
 revolutx market order-book BTC-USD --limit 10
 revolutx orders active
+revolutx orders historical --since 2026-05      # full range to now, fetched in windows
+revolutx trades mine BTC-USD --since 30d        # your executions (fills); BTC/USD works too
 revolutx orders limit buy BTC-USD 0.001 50000 --post-only --yes   # REAL TRADING
 revolutx orders replace <ID> --price 49000 --yes                  # atomic amend (size and/or price)
 revolutx --json market tickers                  # machine-readable output

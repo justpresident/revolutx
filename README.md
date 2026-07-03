@@ -185,8 +185,13 @@ match client.balances().get_all().await {
 | `client.balances()` | `get_all` |
 | `client.configuration()` | `currencies`, `pairs` |
 | `client.market_data()` | `order_book`, `order_book_with_limit`, `public_order_book`, `candles`, `tickers`, `tickers_for`, `last_trades` |
-| `client.orders()` | `limit_buy`/`limit_sell`(`_quote`), `market_buy`/`market_sell`(`_quote`), `place`, `replace`, `get`, `active`, `historical`, `cancel`, `cancel_all`, `fills` |
-| `client.trades()` | `all`, `private` |
+| `client.orders()` | `limit_buy`/`limit_sell`(`_quote`), `market_buy`/`market_sell`(`_quote`), `place`, `place_raw`, `replace`, `get`, `active`, `historical`, `historical_range`, `cancel`, `cancel_all`, `fills` |
+| `client.trades()` | `all`, `private`, `private_range` |
+
+The `*_range` variants fetch an **arbitrary** date range: the exchange answers at
+most 30 days per query (and defaults a missing end to start + 7 days), so they
+walk the range in windows, follow every pagination cursor, and merge the result
+newest-first — with bounded retries on rate limits.
 
 See [`docs/openapi-inventory.md`](docs/openapi-inventory.md) for the full
 operation/schema mapping.

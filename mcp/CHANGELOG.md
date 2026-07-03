@@ -5,7 +5,7 @@ All notable changes to the `revolutx-mcp` server are documented here, following
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The `revolutx` library
 it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.md).
 
-## [Unreleased]
+## [0.3.1] - 2026-07-03
 
 ### Changed
 
