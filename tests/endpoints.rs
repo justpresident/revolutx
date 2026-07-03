@@ -115,6 +115,31 @@ async fn place_limit_order_sends_minified_signed_body() {
 }
 
 #[tokio::test]
+async fn place_raw_sends_caller_body_verbatim() {
+    let resp = r#"{"data":[{"venue_order_id":"7a52e92e-8639-4fe1-abaa-68d3a2d5234b","client_order_id":"984a4d8a-2a9b-4950-822f-2a40037f02bd","state":"pending_new"}]}"#;
+    let server = MockServer::start(200, resp);
+    let client = auth_client(server.base_url());
+
+    // A body the typed model cannot express — the point of the escape hatch.
+    let body = serde_json::json!({
+        "client_order_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "symbol": "BTC-USD",
+        "side": "sell",
+        "order_configuration": { "tpsl": { "quantity": "0.002" } }
+    });
+    let ack = client.orders().place_raw(&body).await.unwrap();
+
+    let req = server.recorded();
+    assert_eq!(req.method, "POST");
+    assert_eq!(req.path(), "/api/1.0/orders");
+    // The signed bytes are the caller's body, minified, with no local rewriting.
+    assert_eq!(req.body_string(), body.to_string());
+    req.assert_signed_with(SEED);
+
+    assert_eq!(ack.state, OrderStatus::PendingNew);
+}
+
+#[tokio::test]
 async fn order_book_encodes_symbol_in_path() {
     let body = r#"{
         "data":{

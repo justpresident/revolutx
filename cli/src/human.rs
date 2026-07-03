@@ -168,6 +168,15 @@ impl Presenter for HumanPresenter {
                         o.fee_currency.as_deref().unwrap_or("")
                     ));
                 }
+                if let Some(t) = &o.conditional {
+                    lines.push(format!("condition: {}", trigger_summary(t)));
+                }
+                if let Some(t) = &o.take_profit {
+                    lines.push(format!("t/profit:  {}", trigger_summary(t)));
+                }
+                if let Some(t) = &o.stop_loss {
+                    lines.push(format!("s/loss:    {}", trigger_summary(t)));
+                }
                 lines.push(format!("created:   {}", o.created_date));
             }
             CommandOutput::Fills(fills) => {
@@ -203,6 +212,27 @@ fn balance_row(
     format!("{ccy:<8} {available:>20} {reserved:>20} {staked:>20} {total:>20}")
 }
 
+/// One line describing an order trigger, e.g.
+/// `limit when price >= 120000 (limit 119500), gtc`.
+fn trigger_summary(t: &revolutx::model::orders::OrderTrigger) -> String {
+    use revolutx::model::orders::TriggerDirection;
+    let direction = match t.trigger_direction {
+        TriggerDirection::Ge => ">=",
+        TriggerDirection::Le => "<=",
+        TriggerDirection::Unknown => "?",
+    };
+    let limit = t
+        .limit_price
+        .map(|limit| format!(" (limit {limit})"))
+        .unwrap_or_default();
+    format!(
+        "{} when price {direction} {}{limit}, {}",
+        t.trigger_type.as_str(),
+        t.trigger_price,
+        t.time_in_force.as_str()
+    )
+}
+
 fn push_levels(lines: &mut Vec<String>, book: &revolutx::model::market_data::OrderBook) {
     lines.push("  asks:".to_owned());
     for level in &book.asks {
@@ -231,6 +261,53 @@ mod tests {
 
     fn dec(s: &str) -> Decimal {
         Decimal::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn tpsl_order_details_show_both_triggers() {
+        // The contract's tpsl read example (a web-UI-created order).
+        let order: revolutx::model::orders::OrderDetails = serde_json::from_str(
+            r#"{
+                "id": "7a52e92e-8639-4fe1-abaa-68d3a2d5234b",
+                "client_order_id": "7a52e92e-8639-4fe1-abaa-68d3a2d5234b",
+                "symbol": "BTC/USD",
+                "side": "sell",
+                "type": "tpsl",
+                "quantity": "0.002",
+                "filled_quantity": "0",
+                "leaves_quantity": "0.002",
+                "status": "new",
+                "time_in_force": "gtc",
+                "execution_instructions": [],
+                "take_profit": {
+                    "trigger_price": "0.003",
+                    "type": "limit",
+                    "trigger_direction": "ge",
+                    "limit_price": "0.004",
+                    "time_in_force": "gtc",
+                    "execution_instructions": ["allow_taker"]
+                },
+                "stop_loss": {
+                    "trigger_price": "0.001",
+                    "type": "market",
+                    "trigger_direction": "le",
+                    "time_in_force": "ioc",
+                    "execution_instructions": ["allow_taker"]
+                },
+                "created_date": 1770197897742,
+                "updated_date": 1770197897742
+            }"#,
+        )
+        .unwrap();
+        let text = render(false, &CommandOutput::Order(Box::new(order))).unwrap();
+        assert!(
+            text.contains("t/profit:  limit when price >= 0.003 (limit 0.004), gtc"),
+            "take-profit line missing:\n{text}"
+        );
+        assert!(
+            text.contains("s/loss:    market when price <= 0.001, ioc"),
+            "stop-loss line missing:\n{text}"
+        );
     }
 
     #[test]

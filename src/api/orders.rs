@@ -303,6 +303,25 @@ impl<'a> OrdersApi<'a> {
         raw.into_ack()
     }
 
+    /// `POST /orders` — places a caller-assembled JSON body **without local
+    /// validation** (**experimental**).
+    ///
+    /// An escape hatch for probing request shapes the contract does not
+    /// document (`examples/tpsl_probe.rs` uses it to re-test take-profit /
+    /// stop-loss placement, which the exchange rejected when probed —
+    /// see `docs/openapi-inventory.md`); prefer [`place`](Self::place) and the
+    /// builders for everything the SDK models. The body travels the normal
+    /// signed transport and the response parses into the usual [`OrderAck`],
+    /// so an accepted probe can be managed (fetched, cancelled) like any other
+    /// order.
+    pub async fn place_raw(&self, body: &serde_json::Value) -> Result<OrderAck> {
+        let raw: RawAck = self
+            .client
+            .send_json(RequestSpec::post_json("/orders", body)?)
+            .await?;
+        raw.into_ack()
+    }
+
     /// `PUT /orders/{id}` — atomically replaces an existing order.
     pub async fn replace(
         &self,

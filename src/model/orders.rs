@@ -16,6 +16,10 @@ pub enum OrderType {
     /// Submitted once a trigger price is reached.
     Conditional,
     /// A take-profit / stop-loss configuration for a position.
+    ///
+    /// Read-only today: the exchange's own UI creates these, but `POST /orders`
+    /// rejects every `tpsl` placement shape unparsed (probed in production
+    /// 2026-07-02; see `docs/openapi-inventory.md` and `examples/tpsl_probe.rs`).
     Tpsl,
     /// A type this SDK version does not recognize (forward compatibility — the
     /// exchange may add order types without an API-version bump).
@@ -92,6 +96,18 @@ pub enum TimeInForce {
     Unknown,
 }
 
+impl TimeInForce {
+    /// The on-the-wire token for this time in force.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gtc => "gtc",
+            Self::Ioc => "ioc",
+            Self::Fok => "fok",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// An execution instruction attached to an order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,6 +136,17 @@ pub enum TriggerType {
     Unknown,
 }
 
+impl TriggerType {
+    /// The on-the-wire token for this trigger type.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Market => "market",
+            Self::Limit => "limit",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// The price-comparison operator that activates a trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -132,6 +159,17 @@ pub enum TriggerDirection {
     /// one exotic trigger does not fail deserialization of a whole orders page.
     #[serde(other)]
     Unknown,
+}
+
+impl TriggerDirection {
+    /// The on-the-wire token for this trigger direction.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ge => "ge",
+            Self::Le => "le",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Trigger conditions for conditional and take-profit / stop-loss orders.
@@ -294,6 +332,11 @@ pub struct MarketOrderConfiguration {
 }
 
 /// Order configuration. Exactly one of `limit` / `market` is set.
+///
+/// There is deliberately no `tpsl` configuration: `POST /orders` rejects every
+/// take-profit / stop-loss placement shape unparsed (probed in production
+/// 2026-07-02; `examples/tpsl_probe.rs` reproduces the sweep via
+/// [`place_raw`](crate::api::orders::OrdersApi::place_raw)).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderConfiguration {
     /// Limit-order configuration.

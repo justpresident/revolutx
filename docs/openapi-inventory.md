@@ -63,6 +63,17 @@ follows the examples (which appear closer to real responses) and stays tolerant:
 - **Order placement/replacement `data`**: the schema types `data` as an object,
   but every example wraps it in a single-element array. `OrderAck` parsing
   accepts either shape (`model::OneOrMany`).
+- **`tpsl` placement is unsupported, not just undocumented**: `Order.type`
+  includes `tpsl` and the read examples show web-UI-created TP/SL orders, yet
+  `OrderPlacementRequest` documents only `limit`/`market` configurations.
+  Probed in production 2026-07-02 (`examples/tpsl_probe.rs`, built on
+  `orders().place_raw()`): every candidate placement shape — the read model
+  mirrored under `order_configuration.tpsl` with `base_size` or `quantity`
+  sizing, and triggers inline or top-level — was rejected with the same
+  "Order configuration is incomplete" error an unknown configuration key gets,
+  so the endpoint drops unrecognized keys unparsed. TP/SL orders can currently
+  be created only through the exchange's own UI; the SDK therefore ships no
+  typed `tpsl` placement API. Re-run the probe after exchange updates.
 - **`Order.price` required vs. optional**: `price` is in the schema's `required`
   list, yet the `tpsl`/`conditional` examples omit it. The SDK models `price`
   as optional.

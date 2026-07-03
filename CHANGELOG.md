@@ -13,6 +13,18 @@ binary changes were logged together in this file.
 
 ### Added
 
+- `orders().place_raw(&serde_json::Value)` (**experimental**): posts a
+  caller-assembled body to `POST /orders` without local validation, over the
+  normal signed transport, parsing the usual `OrderAck`. An escape hatch for
+  probing request shapes the contract does not document; prefer `place()` and
+  the builders for everything the SDK models. `examples/tpsl_probe.rs` uses it
+  to test take-profit / stop-loss placement, which the contract documents only
+  for *reading*: probed in production 2026-07-02, every candidate shape was
+  rejected identically to an unknown configuration key, so the public API does
+  not support `tpsl` placement today (see `docs/openapi-inventory.md`) — which
+  is why no typed `tpsl` placement API ships.
+- `as_str()` on `TimeInForce`, `TriggerType`, and `TriggerDirection`, matching
+  the existing `OrderType`/`OrderStatus` accessors.
 - `Error::is_connection_unusable()` and a distinct `Error::AgentUnusable` variant
   (agent feature): a transport error on the signing-agent stream now surfaces as
   a typed, permanently-unusable condition rather than a generic `Agent` error, so

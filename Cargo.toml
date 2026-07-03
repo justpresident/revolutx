@@ -75,7 +75,7 @@ subtle = { version = "2", optional = true }
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tempfile = "3"
 
 [package.metadata.docs.rs]
