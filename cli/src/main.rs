@@ -26,6 +26,7 @@
 
 mod adapter;
 mod agent;
+mod agentlog;
 mod args;
 mod creds;
 mod datetime;

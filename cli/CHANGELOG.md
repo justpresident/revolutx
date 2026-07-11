@@ -7,6 +7,17 @@ library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.m
 
 ## [Unreleased]
 
+### Added
+
+- The agent writes a secrets-free event log to the file named by
+  `REVOLUTX_AGENT_LOG` (opt-in; unset means no log). It records startup,
+  `listening` (socket + access ceiling), the shutdown reason, the security
+  watchdog's hard-exit reasons (clock anomaly / debugger), and panics — each a
+  timestamped `0600` line — so an abnormal exit is diagnosable from a file even
+  when the console is wrecked or stderr is lost. A panic hook restores the
+  terminal and records the panic before chaining to the default handler. Only
+  lifecycle metadata is logged; the password, keys, and one-time token never are.
+
 ### Fixed
 
 - The agent no longer dies silently — killed by its own ptrace-protection
@@ -20,8 +31,12 @@ library it builds on has its own changelog at [`../CHANGELOG.md`](../CHANGELOG.m
   blocked for every hardened command before the protection fork, and SIGINT is
   blocked for the agent like it already was for the shell (Ctrl-C still works —
   rustyline reads it as a keystroke and shuts down gracefully). SIGTERM/SIGHUP
-  remain lethal under rcypher 0.4's watchdog; the proper fix (re-injecting
-  signals with `PTRACE_CONT` instead of killing) belongs in rcypher.
+  remain lethal under the watchdog, but **rcypher 0.4.1** (now adopted) makes
+  that kill observable: the watchdog parent restores the terminal and exits
+  `128 + signal` instead of wedging the console and exiting a bare `1`, so a
+  `docker stop` (SIGTERM → 143) or terminal close (SIGHUP → 129) is legible.
+  Full graceful handling (re-injecting signals with `PTRACE_CONT` instead of
+  killing) is still future work in rcypher.
 - Every agent exit path now restores the terminal state captured at startup —
   the idle auto-lock, a server error, Ctrl-C, panics, and the watchdog's hard
   exits previously ended the process while the operator console still held the

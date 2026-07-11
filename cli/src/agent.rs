@@ -32,6 +32,7 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Editor, Helper};
 use tokio::sync::Notify;
 
+use crate::agentlog;
 use crate::args::{AgentCmd, GlobalOpts};
 use crate::creds;
 use crate::term::{RestoreOnDrop, SavedTerminal};
@@ -71,6 +72,12 @@ fn start(
     // guard covers panic unwinds.
     let terminal = SavedTerminal::capture();
     let _restore_on_panic = RestoreOnDrop(terminal);
+
+    // Open the optional event log (REVOLUTX_AGENT_LOG) and route panics through
+    // a hook that restores the terminal AND records the panic — so an abnormal
+    // exit is diagnosable from the file even when the console is wrecked.
+    agentlog::init();
+    install_panic_hook(terminal);
 
     // An optional one-time token for headless clients (e.g. the MCP). When omitted,
     // connections are authorized only interactively from the console below.
@@ -117,6 +124,11 @@ fn start(
     eprintln!(
         "revolutx-agent: operator console ready — type `help` (list, grant <id> [tier], deny <id>, quit)"
     );
+    agentlog::event(&format!(
+        "listening: socket={} access={}",
+        socket_path.display(),
+        access.as_str(),
+    ));
     let result: Res<Option<&str>> = runtime.block_on(async {
         tokio::select! {
             outcome = server.run(&socket_path) => outcome.map(|()| None).map_err(Into::into),
@@ -124,6 +136,11 @@ fn start(
             () = idle_shutdown.notified() => Ok(Some("idle timeout — locking and exiting")),
         }
     });
+    match &result {
+        Ok(Some(reason)) => agentlog::event(&format!("shutdown: {reason}")),
+        Ok(None) => agentlog::event("shutdown: server stopped"),
+        Err(e) => agentlog::event(&format!("shutdown: error: {e}")),
+    }
     // Leave raw mode BEFORE the farewell (the console thread may still be
     // blocked in readline), so the message renders legibly and the shell the
     // user returns to works.
@@ -134,6 +151,19 @@ fn start(
         eprintln!("revolutx-agent: {reason}");
     }
     Ok(())
+}
+
+/// Installs a panic hook that restores the terminal FIRST (so the panic message
+/// renders legibly and the shell is usable) and records the panic in the event
+/// log, then chains to the default hook. `SavedTerminal` is `Copy` and its
+/// `restore` is safe from the panicking thread.
+fn install_panic_hook(terminal: SavedTerminal) {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        terminal.restore();
+        agentlog::event(&format!("PANIC: {info}"));
+        default(info);
+    }));
 }
 
 /// Prints the one-time authentication token prominently to stderr (the operator's
@@ -496,6 +526,7 @@ fn watchdog_loop(
 }
 
 fn exit(socket_path: &std::path::Path, terminal: SavedTerminal, code: i32, reason: &str) -> ! {
+    agentlog::event(&format!("hard-exit: {reason} (code {code})"));
     // Leave the console's raw mode before printing, or the reason renders
     // garbled and the user's shell is left broken (process::exit runs no
     // destructors, so rustyline would never restore the terminal).
