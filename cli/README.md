@@ -133,6 +133,11 @@ agent. Protections:
 - **`0600` socket** in `$XDG_RUNTIME_DIR` (itself user-private); no network
   transport.
 - A **watchdog thread** keeps checking for an attached debugger while serving.
+- **Diagnostic log (opt-in).** Set `REVOLUTX_AGENT_LOG=<path>` to append a
+  secrets-free, timestamped `0600` event log — startup, `listening`, the shutdown
+  reason, the watchdog's hard-exit reasons, and panics — so an abrupt exit is
+  diagnosable from a file even when the console is left wrecked. Only lifecycle
+  metadata is written; the password, keys, and one-time token never are.
 
 ## Safety
 
